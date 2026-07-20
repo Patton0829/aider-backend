@@ -1,9 +1,10 @@
 # Aider Agent Backend
 
-中心云控制台的 FastAPI 智能体后端，包含两条独立实时通道：
+中心云控制台的 FastAPI 智能体后端，包含三条独立实时通道：
 
 - `/ws/agent`：千问聊天与 aider 代码修改。
 - `/ws/jobs/{job_id}/logs`：Slurm 算法日志增量推送。
+- `/ws/knowledge`：检索列车故障诊断知识库并调用 GLM 流式回答。
 
 ## 目录
 
@@ -45,6 +46,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/api/models
+curl http://127.0.0.1:8000/api/knowledge/info
 ```
 
 ## Agent WebSocket 协议
@@ -85,6 +87,29 @@ ws://127.0.0.1:8000/ws/agent
 - `ready`
 - `error`
 - `closed`
+
+## 故障诊断知识问答
+
+知识库默认读取仓库根目录的 `列车故障诊断经验知识库.md`，可通过
+`KNOWLEDGE_BASE_PATH` 覆盖。GLM 使用 OpenAI 兼容接口，配置见 `.env.example`。
+
+连接：
+
+```text
+ws://127.0.0.1:8000/ws/knowledge
+```
+
+提问：
+
+```json
+{
+  "type": "ask",
+  "question": "转辙机锁闭不到位可能是什么原因？"
+}
+```
+
+服务依次发送 `status`、`sources`、`delta`、`done` 和 `ready` 事件。
+发送 `{"type":"clear"}` 可清空当前连接的对话上下文。
 
 ## 算法日志 WebSocket
 

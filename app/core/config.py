@@ -14,6 +14,18 @@ class Settings(BaseModel):
     qwen_plus_model: str = "qwen3-coder-plus"
     qwen_flash_model: str = "qwen3-coder-flash"
 
+    glm_base_url: str = "http://115.190.191.103:8081/v1"
+    glm_api_key: str = "not-needed"
+    glm_model: str = "glm"
+    glm_max_tokens: int = Field(default=4096, ge=512)
+    glm_timeout_seconds: float = Field(default=120.0, gt=0)
+    glm_max_concurrency: int = Field(default=2, ge=1)
+    glm_temperature: float = Field(default=0.2, ge=0, le=2)
+
+    knowledge_base_path: Path = PROJECT_ROOT / "列车故障诊断经验知识库.md"
+    knowledge_top_k: int = Field(default=5, ge=1, le=20)
+    knowledge_history_turns: int = Field(default=6, ge=0, le=20)
+
     aider_source_root: Path = Path("/Users/patton/system/aider")
     aider_model: str = "openai/qwen3-coder-plus"
     aider_edit_format: str = "diff"

@@ -6,13 +6,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.services.aider import AiderSessionManager
+from app.services.glm import GlmService
+from app.services.knowledge import KnowledgeService
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
     app.state.aider_sessions = AiderSessionManager()
-    yield
-    await app.state.aider_sessions.close_all()
+    app.state.knowledge_service = KnowledgeService(
+        settings.knowledge_base_path,
+        settings.knowledge_top_k,
+    )
+    app.state.knowledge_service.reload_if_changed(force=True)
+    app.state.glm_service = GlmService(settings)
+    try:
+        yield
+    finally:
+        await app.state.aider_sessions.close_all()
+        await app.state.glm_service.close()
 
 
 settings = get_settings()
@@ -29,4 +41,3 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(api_router)
-
