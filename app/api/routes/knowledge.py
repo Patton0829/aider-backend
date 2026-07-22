@@ -5,7 +5,11 @@ from app.core.config import get_settings
 from app.core.security import authorize_websocket
 from app.schemas.knowledge import KnowledgeEvent, KnowledgeRequest, KnowledgeSource
 from app.services.glm import GlmService
-from app.services.knowledge import KnowledgeSearchResult, KnowledgeService
+from app.services.knowledge import (
+    KnowledgeSearchResult,
+    KnowledgeService,
+    is_contextual_follow_up,
+)
 
 
 router = APIRouter()
@@ -73,12 +77,23 @@ async def knowledge_socket(websocket: WebSocket):
 
             await send_event(websocket, "status", "正在检索故障诊断知识库")
             try:
-                recent_user_questions = [
-                    message["content"]
-                    for message in history[-4:]
-                    if message["role"] == "user"
-                ]
-                retrieval_query = " ".join([*recent_user_questions[-1:], question])
+                contextual_follow_up = bool(history) and is_contextual_follow_up(
+                    question
+                )
+                if contextual_follow_up:
+                    recent_user_questions = [
+                        message["content"]
+                        for message in history[-4:]
+                        if message["role"] == "user"
+                    ]
+                    retrieval_query = " ".join(
+                        [*recent_user_questions[-1:], question]
+                    )
+                else:
+                    # A standalone question starts a new diagnostic topic. Keeping
+                    # the prior topic here can dominate both retrieval and GLM output.
+                    history.clear()
+                    retrieval_query = question
                 results = knowledge.search(retrieval_query)
                 if not results:
                     content = "当前知识库中没有足够信息。请补充设备类型、故障现象和监测数据。"

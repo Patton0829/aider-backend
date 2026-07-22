@@ -2,7 +2,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.services.knowledge import KnowledgeService, parse_markdown
+from app.services.knowledge import (
+    KnowledgeService,
+    is_contextual_follow_up,
+    parse_markdown,
+)
 
 
 SAMPLE_KNOWLEDGE = """# 测试知识库
@@ -21,6 +25,7 @@ SAMPLE_KNOWLEDGE = """# 测试知识库
 | 条目ID | 故障名称 | 故障现象 |
 |--------|---------|---------|
 | MOT-001 | 定子绕组匝间短路 | 三相电流不平衡 |
+| MOT-007 | 冷却风机故障 | 牵引电机温度异常升高 |
 """
 
 
@@ -63,4 +68,18 @@ class KnowledgeSearchTest(unittest.TestCase):
 
         self.assertTrue(info["ready"])
         self.assertEqual(info["document"], "knowledge.md")
-        self.assertEqual(info["chunkCount"], 3)
+        self.assertEqual(info["chunkCount"], 4)
+
+    def test_motor_temperature_query_retrieves_motor_fault(self):
+        results = self.service.search("牵引电机温度异常如何排查")
+
+        self.assertEqual(results[0].chunk.entry_id, "MOT-007")
+
+
+class KnowledgeConversationTest(unittest.TestCase):
+    def test_new_fault_topic_does_not_reuse_previous_context(self):
+        self.assertFalse(is_contextual_follow_up("牵引电机温度异常如何排查"))
+
+    def test_explicit_follow_up_reuses_previous_context(self):
+        self.assertTrue(is_contextual_follow_up("那应该先检查哪里？"))
+        self.assertTrue(is_contextual_follow_up("上述故障还需要测哪些参数？"))

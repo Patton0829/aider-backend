@@ -9,10 +9,37 @@ from pathlib import Path
 ENTRY_ID_RE = re.compile(r"\b[A-Z]{2,8}-\d{3}\b", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z][a-z0-9_-]*|\d+(?:\.\d+)?|[\u4e00-\u9fff]+", re.IGNORECASE)
 TABLE_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
+CONTEXTUAL_FOLLOW_UP_PREFIXES = (
+    "这个",
+    "这种",
+    "该故障",
+    "上述",
+    "前面",
+    "刚才",
+    "它",
+    "其",
+    "那应该",
+    "那么应该",
+    "那要",
+    "那么要",
+    "那还",
+    "那么还",
+    "还需要",
+    "下一步",
+    "继续",
+)
 
 
 class KnowledgeUnavailableError(RuntimeError):
     pass
+
+
+def is_contextual_follow_up(question: str) -> bool:
+    normalized = "".join(question.split())
+    return any(
+        normalized.startswith(prefix)
+        for prefix in CONTEXTUAL_FOLLOW_UP_PREFIXES
+    )
 
 
 @dataclass(frozen=True)
