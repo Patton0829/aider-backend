@@ -20,8 +20,14 @@ async def send_event(
     event_type: str,
     content: str = "",
     sources: list[KnowledgeSource] | None = None,
+    request_id: str | None = None,
 ):
-    event = KnowledgeEvent(type=event_type, content=content, sources=sources or [])
+    event = KnowledgeEvent(
+        type=event_type,
+        content=content,
+        sources=sources or [],
+        request_id=request_id,
+    )
     await websocket.send_json(event.model_dump(by_alias=True, exclude_none=True))
 
 
@@ -58,7 +64,15 @@ async def knowledge_socket(websocket: WebSocket):
             try:
                 request = KnowledgeRequest.model_validate(payload)
             except ValidationError as error:
-                await send_event(websocket, "error", str(error))
+                request_id = (
+                    payload.get("requestId") if isinstance(payload, dict) else None
+                )
+                await send_event(
+                    websocket,
+                    "error",
+                    str(error),
+                    request_id=request_id,
+                )
                 continue
 
             if request.type == "close":
@@ -72,10 +86,21 @@ async def knowledge_socket(websocket: WebSocket):
 
             question = request.question.strip()
             if not question:
-                await send_event(websocket, "error", "question must not be empty")
+                await send_event(
+                    websocket,
+                    "error",
+                    "question must not be empty",
+                    request_id=request.request_id,
+                )
                 continue
 
-            await send_event(websocket, "status", "正在检索故障诊断知识库")
+            request_id = request.request_id
+            await send_event(
+                websocket,
+                "status",
+                "正在检索故障诊断知识库",
+                request_id=request_id,
+            )
             try:
                 contextual_follow_up = bool(history) and is_contextual_follow_up(
                     question
@@ -97,19 +122,39 @@ async def knowledge_socket(websocket: WebSocket):
                 results = knowledge.search(retrieval_query)
                 if not results:
                     content = "当前知识库中没有足够信息。请补充设备类型、故障现象和监测数据。"
-                    await send_event(websocket, "delta", content)
-                    await send_event(websocket, "done")
-                    await send_event(websocket, "ready")
+                    await send_event(
+                        websocket,
+                        "delta",
+                        content,
+                        request_id=request_id,
+                    )
+                    await send_event(websocket, "done", request_id=request_id)
+                    await send_event(websocket, "ready", request_id=request_id)
                     continue
 
-                await send_event(websocket, "sources", sources=source_models(results))
-                await send_event(websocket, "status", "GLM 正在分析检索结果")
+                await send_event(
+                    websocket,
+                    "sources",
+                    sources=source_models(results),
+                    request_id=request_id,
+                )
+                await send_event(
+                    websocket,
+                    "status",
+                    "GLM 正在分析检索结果",
+                    request_id=request_id,
+                )
 
                 answer = ""
                 context = knowledge.format_context(results)
                 async for delta in glm.stream_answer(question, context, history):
                     answer += delta
-                    await send_event(websocket, "delta", delta)
+                    await send_event(
+                        websocket,
+                        "delta",
+                        delta,
+                        request_id=request_id,
+                    )
 
                 history.extend(
                     [
@@ -123,10 +168,15 @@ async def knowledge_socket(websocket: WebSocket):
                 else:
                     history.clear()
 
-                await send_event(websocket, "done")
-                await send_event(websocket, "ready")
+                await send_event(websocket, "done", request_id=request_id)
+                await send_event(websocket, "ready", request_id=request_id)
             except Exception as error:
-                await send_event(websocket, "error", str(error))
-                await send_event(websocket, "ready")
+                await send_event(
+                    websocket,
+                    "error",
+                    str(error),
+                    request_id=request_id,
+                )
+                await send_event(websocket, "ready", request_id=request_id)
     except WebSocketDisconnect:
         pass
