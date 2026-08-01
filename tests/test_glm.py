@@ -72,3 +72,17 @@ class GlmServiceTest(unittest.IsolatedAsyncioTestCase):
                 item
                 async for item in service.stream_answer("问题", "资料", [])
             ]
+
+    async def test_direct_answer_does_not_inject_knowledge_context(self):
+        client = FakeClient([chunk(content="你好，我可以帮助你。")])
+        service = GlmService(Settings(), client=client)
+
+        output = [
+            item
+            async for item in service.stream_direct_answer("你好", [])
+        ]
+
+        self.assertEqual(output, ["你好，我可以帮助你。"])
+        messages = client.chat.completions.request["messages"]
+        self.assertEqual(messages[-1]["content"], "你好")
+        self.assertNotIn("知识库资料", messages[-1]["content"])

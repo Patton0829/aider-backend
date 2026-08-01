@@ -3,9 +3,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.services.knowledge import (
+    KnowledgeDocumentConflictError,
     KnowledgeService,
+    KnowledgeValidationError,
     is_contextual_follow_up,
     parse_markdown,
+    should_retrieve_knowledge,
 )
 
 
@@ -83,3 +86,50 @@ class KnowledgeConversationTest(unittest.TestCase):
     def test_explicit_follow_up_reuses_previous_context(self):
         self.assertTrue(is_contextual_follow_up("那应该先检查哪里？"))
         self.assertTrue(is_contextual_follow_up("上述故障还需要测哪些参数？"))
+
+    def test_fault_questions_use_knowledge_route(self):
+        self.assertTrue(should_retrieve_knowledge("转辙机锁闭不到位是什么故障？"))
+        self.assertTrue(should_retrieve_knowledge("请解释 SW-021"))
+
+    def test_general_questions_use_direct_route(self):
+        self.assertFalse(should_retrieve_knowledge("你好，请介绍一下你自己"))
+        self.assertFalse(should_retrieve_knowledge("帮我写一份会议摘要"))
+
+
+class KnowledgeDocumentManagementTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        root = Path(self.directory.name)
+        self.seed_path = root / "seed.md"
+        self.seed_path.write_text(SAMPLE_KNOWLEDGE, encoding="utf-8")
+        self.storage_dir = root / "managed"
+        self.service = KnowledgeService(
+            self.seed_path,
+            top_k=3,
+            storage_dir=self.storage_dir,
+            max_upload_bytes=4096,
+        )
+        self.service.reload_if_changed(force=True)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_seeds_default_document_and_manages_uploaded_document(self):
+        uploaded = self.service.upload_document(
+            "supplement.md",
+            "# 补充知识\n\n## 车门系统\n\n车门无法关闭时检查障碍物传感器。".encode(),
+        )
+
+        self.assertEqual(uploaded["name"], "supplement.md")
+        self.assertEqual(self.service.info()["documentCount"], 2)
+        self.assertTrue(self.service.search("车门无法关闭"))
+
+        info = self.service.delete_document("supplement.md")
+        self.assertEqual(info["documentCount"], 1)
+        self.assertFalse((self.storage_dir / "supplement.md").exists())
+
+    def test_rejects_duplicate_and_unsupported_documents(self):
+        with self.assertRaises(KnowledgeDocumentConflictError):
+            self.service.upload_document("seed.md", SAMPLE_KNOWLEDGE.encode())
+        with self.assertRaises(KnowledgeValidationError):
+            self.service.upload_document("knowledge.pdf", b"not supported")

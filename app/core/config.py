@@ -23,6 +23,8 @@ class Settings(BaseModel):
     glm_temperature: float = Field(default=0.2, ge=0, le=2)
 
     knowledge_base_path: Path = PROJECT_ROOT / "列车故障诊断经验知识库.md"
+    knowledge_base_dir: Path = PROJECT_ROOT / "knowledge-bases"
+    knowledge_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     knowledge_top_k: int = Field(default=5, ge=1, le=20)
     knowledge_history_turns: int = Field(default=6, ge=0, le=20)
 

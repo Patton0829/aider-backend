@@ -1,14 +1,41 @@
 import math
+import os
 import re
+import shutil
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 
 ENTRY_ID_RE = re.compile(r"\b[A-Z]{2,8}-\d{3}\b", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z][a-z0-9_-]*|\d+(?:\.\d+)?|[\u4e00-\u9fff]+", re.IGNORECASE)
 TABLE_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
+SUPPORTED_KNOWLEDGE_EXTENSIONS = {".md", ".markdown", ".txt"}
+KNOWLEDGE_INTENT_TERMS = (
+    "故障",
+    "异常",
+    "报警",
+    "告警",
+    "诊断",
+    "排查",
+    "检修",
+    "维修",
+    "失效",
+    "损坏",
+    "转辙机",
+    "道岔机",
+    "道岔",
+    "牵引电机",
+    "轴承",
+    "卡尔曼",
+    "制动系统",
+    "车门系统",
+    "轨道电路",
+    "受电弓",
+    "轮对",
+)
 CONTEXTUAL_FOLLOW_UP_PREFIXES = (
     "这个",
     "这种",
@@ -34,6 +61,18 @@ class KnowledgeUnavailableError(RuntimeError):
     pass
 
 
+class KnowledgeValidationError(ValueError):
+    pass
+
+
+class KnowledgeDocumentConflictError(FileExistsError):
+    pass
+
+
+class KnowledgeDocumentNotFoundError(FileNotFoundError):
+    pass
+
+
 def is_contextual_follow_up(question: str) -> bool:
     normalized = "".join(question.split())
     return any(
@@ -42,9 +81,19 @@ def is_contextual_follow_up(question: str) -> bool:
     )
 
 
+def should_retrieve_knowledge(question: str) -> bool:
+    normalized = "".join(question.lower().split())
+    if not normalized:
+        return False
+    if ENTRY_ID_RE.search(question):
+        return True
+    return any(term in normalized for term in KNOWLEDGE_INTENT_TERMS)
+
+
 @dataclass(frozen=True)
 class KnowledgeChunk:
     chunk_id: str
+    document: str
     chapter: str
     section: str
     entry_id: str | None
@@ -65,6 +114,7 @@ class KnowledgeSearchResult:
 
     def source_dict(self) -> dict[str, str | int | float | None]:
         return {
+            "document": self.chunk.document,
             "chapter": self.chunk.chapter,
             "section": self.chunk.section,
             "entry_id": self.chunk.entry_id,
@@ -103,7 +153,7 @@ def _tokens(text: str) -> list[str]:
     return terms
 
 
-def parse_markdown(text: str) -> list[KnowledgeChunk]:
+def parse_markdown(text: str, document: str = "") -> list[KnowledgeChunk]:
     chunks: list[KnowledgeChunk] = []
     chapter = ""
     section = ""
@@ -118,7 +168,8 @@ def parse_markdown(text: str) -> list[KnowledgeChunk]:
         entry_match = ENTRY_ID_RE.search(content)
         chunks.append(
             KnowledgeChunk(
-                chunk_id=f"chunk-{len(chunks) + 1}",
+                chunk_id=f"{document or 'knowledge'}:chunk-{len(chunks) + 1}",
+                document=document,
                 chapter=chapter,
                 section=section,
                 entry_id=entry_match.group(0).upper() if entry_match else None,
@@ -189,41 +240,122 @@ def parse_markdown(text: str) -> list[KnowledgeChunk]:
 
 
 class KnowledgeService:
-    def __init__(self, path: Path, top_k: int = 5):
+    def __init__(
+        self,
+        path: Path,
+        top_k: int = 5,
+        storage_dir: Path | None = None,
+        max_upload_bytes: int = 10 * 1024 * 1024,
+    ):
         self.path = path.resolve()
+        self.storage_dir = storage_dir.resolve() if storage_dir else None
         self.top_k = top_k
+        self.max_upload_bytes = max_upload_bytes
         self.chunks: list[KnowledgeChunk] = []
         self._term_counts: list[Counter[str]] = []
         self._document_frequency: Counter[str] = Counter()
         self._average_length = 0.0
         self._mtime_ns: int | None = None
+        self._signature: tuple[tuple[str, int, int], ...] | None = None
         self._load_error: str | None = None
+        self._documents: list[dict[str, str | int]] = []
+
+    def _prepare_storage(self):
+        if self.storage_dir is None:
+            return
+
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        initialized_marker = self.storage_dir / ".initialized"
+        if initialized_marker.exists():
+            return
+
+        has_documents = any(self._iter_storage_documents())
+        if self.path.is_file() and not has_documents:
+            shutil.copy2(self.path, self.storage_dir / self.path.name)
+        initialized_marker.touch(exist_ok=True)
+
+    def _iter_storage_documents(self):
+        if self.storage_dir is None or not self.storage_dir.is_dir():
+            return iter(())
+        return (
+            item
+            for item in sorted(self.storage_dir.iterdir(), key=lambda value: value.name.lower())
+            if item.is_file() and item.suffix.lower() in SUPPORTED_KNOWLEDGE_EXTENSIONS
+        )
+
+    def _document_paths(self) -> list[Path]:
+        if self.storage_dir is None:
+            return [self.path] if self.path.is_file() else []
+        self._prepare_storage()
+        return list(self._iter_storage_documents())
+
+    @staticmethod
+    def _signature_for(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+        return tuple(
+            (path.name, stat.st_mtime_ns, stat.st_size)
+            for path in paths
+            for stat in (path.stat(),)
+        )
+
+    @staticmethod
+    def _document_info(path: Path, chunk_count: int) -> dict[str, str | int]:
+        stat = path.stat()
+        return {
+            "name": path.name,
+            "size": stat.st_size,
+            "chunkCount": chunk_count,
+            "lastModified": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
+        }
+
+    def _replace_index(
+        self,
+        chunks: list[KnowledgeChunk],
+        documents: list[dict[str, str | int]],
+        signature: tuple[tuple[str, int, int], ...],
+    ):
+        term_counts = [
+            Counter(
+                _tokens(
+                    f"{chunk.document} {chunk.chapter} {chunk.section} {chunk.content}"
+                )
+            )
+            for chunk in chunks
+        ]
+        document_frequency: Counter[str] = Counter()
+        for counts in term_counts:
+            document_frequency.update(counts.keys())
+
+        self.chunks = chunks
+        self._term_counts = term_counts
+        self._document_frequency = document_frequency
+        self._average_length = (
+            sum(sum(counts.values()) for counts in term_counts) / len(chunks)
+            if chunks
+            else 0.0
+        )
+        self._documents = documents
+        self._signature = signature
+        self._mtime_ns = max((item[1] for item in signature), default=None)
 
     def reload_if_changed(self, force: bool = False) -> bool:
         try:
-            stat = self.path.stat()
-            if not force and self._mtime_ns == stat.st_mtime_ns and self.chunks:
+            paths = self._document_paths()
+            signature = self._signature_for(paths)
+            if not force and self._signature == signature:
                 return False
 
-            text = self.path.read_text(encoding="utf-8")
-            chunks = parse_markdown(text)
-            if not chunks:
-                raise ValueError("knowledge base contains no searchable content")
+            chunks: list[KnowledgeChunk] = []
+            documents: list[dict[str, str | int]] = []
+            for path in paths:
+                text = path.read_text(encoding="utf-8-sig")
+                document_chunks = parse_markdown(text, document=path.name)
+                if not document_chunks:
+                    raise ValueError(f"{path.name} contains no searchable content")
+                chunks.extend(document_chunks)
+                documents.append(self._document_info(path, len(document_chunks)))
 
-            term_counts = [
-                Counter(_tokens(f"{chunk.chapter} {chunk.section} {chunk.content}"))
-                for chunk in chunks
-            ]
-            document_frequency: Counter[str] = Counter()
-            for counts in term_counts:
-                document_frequency.update(counts.keys())
-
-            self.chunks = chunks
-            self._term_counts = term_counts
-            self._document_frequency = document_frequency
-            self._average_length = sum(sum(counts.values()) for counts in term_counts) / len(chunks)
-            self._mtime_ns = stat.st_mtime_ns
-            self._load_error = None
+            self._replace_index(chunks, documents, signature)
+            self._load_error = None if chunks else "knowledge base is empty"
             return True
         except (OSError, UnicodeError, ValueError) as error:
             self._load_error = str(error)
@@ -269,7 +401,7 @@ class KnowledgeService:
             if chunk.entry_id and chunk.entry_id in query_entry_ids:
                 score += 100.0
 
-            title_compact = _compact(f"{chunk.chapter}{chunk.section}")
+            title_compact = _compact(f"{chunk.document}{chunk.chapter}{chunk.section}")
             content_compact = _compact(chunk.content)
             if len(query_compact) >= 2 and query_compact in content_compact:
                 score += 8.0
@@ -279,27 +411,115 @@ class KnowledgeService:
             if score > 0:
                 results.append(KnowledgeSearchResult(chunk=chunk, score=score))
 
-        results.sort(key=lambda item: (-item.score, item.chunk.line_start))
+        results.sort(
+            key=lambda item: (
+                -item.score,
+                item.chunk.document.lower(),
+                item.chunk.line_start,
+            )
+        )
         return results[: top_k or self.top_k]
 
     def format_context(self, results: list[KnowledgeSearchResult]) -> str:
         blocks = []
         for index, result in enumerate(results, start=1):
             blocks.append(
-                f"[资料{index}] 来源：{result.chunk.source_label}，"
+                f"[资料{index}] 文档：{result.chunk.document}；"
+                f"来源：{result.chunk.source_label}；"
                 f"原文行：{result.chunk.line_start}-{result.chunk.line_end}\n"
                 f"{result.chunk.content}"
             )
         return "\n\n".join(blocks)
 
-    def info(self) -> dict[str, str | int | bool | None]:
+    @staticmethod
+    def _safe_document_name(filename: str) -> str:
+        name = Path(filename).name.strip()
+        if not name or name != filename.strip() or name.startswith("."):
+            raise KnowledgeValidationError("invalid knowledge document name")
+        if Path(name).suffix.lower() not in SUPPORTED_KNOWLEDGE_EXTENSIONS:
+            raise KnowledgeValidationError(
+                "only .md, .markdown and .txt knowledge documents are supported"
+            )
+        return name
+
+    def upload_document(self, filename: str, content: bytes) -> dict[str, str | int]:
+        if self.storage_dir is None:
+            raise KnowledgeValidationError("knowledge document storage is not configured")
+        name = self._safe_document_name(filename)
+        self._prepare_storage()
+        target = self.storage_dir / name
+        if target.exists():
+            raise KnowledgeDocumentConflictError(f"knowledge document already exists: {name}")
+        if not content:
+            raise KnowledgeValidationError("knowledge document must not be empty")
+        if len(content) > self.max_upload_bytes:
+            raise KnowledgeValidationError(
+                f"knowledge document exceeds {self.max_upload_bytes} bytes"
+            )
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise KnowledgeValidationError("knowledge document must use UTF-8 encoding") from error
+        if not parse_markdown(text, document=name):
+            raise KnowledgeValidationError("knowledge document contains no searchable content")
+
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="wb",
+                dir=self.storage_dir,
+                prefix=".upload-",
+                suffix=target.suffix,
+                delete=False,
+            ) as temporary:
+                temporary.write(content)
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, target)
+            temporary_path = None
+            if not self.reload_if_changed(force=True):
+                raise KnowledgeValidationError(
+                    self._load_error or "knowledge index rebuild failed"
+                )
+        except Exception:
+            target.unlink(missing_ok=True)
+            self.reload_if_changed(force=True)
+            raise
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+        return next(document for document in self._documents if document["name"] == name)
+
+    def delete_document(self, filename: str) -> dict[str, str | int | bool | None | list]:
+        if self.storage_dir is None:
+            raise KnowledgeValidationError("knowledge document storage is not configured")
+        name = self._safe_document_name(filename)
+        self._prepare_storage()
+        target = self.storage_dir / name
+        if not target.is_file():
+            raise KnowledgeDocumentNotFoundError(f"knowledge document not found: {name}")
+        target.unlink()
+        self.reload_if_changed(force=True)
+        return self.info()
+
+    def info(self) -> dict[str, str | int | bool | None | list]:
         self.reload_if_changed()
         last_modified = None
         if self._mtime_ns is not None:
-            last_modified = datetime.fromtimestamp(self._mtime_ns / 1_000_000_000).astimezone().isoformat()
+            last_modified = datetime.fromtimestamp(
+                self._mtime_ns / 1_000_000_000
+            ).astimezone().isoformat()
+        if len(self._documents) == 1:
+            document_label = str(self._documents[0]["name"])
+        elif self._documents:
+            document_label = f"{len(self._documents)} 个知识库文档"
+        else:
+            document_label = "暂无知识库文档"
         return {
             "ready": bool(self.chunks),
-            "document": self.path.name,
+            "document": document_label,
+            "documentCount": len(self._documents),
+            "documents": list(self._documents),
             "chunkCount": len(self.chunks),
             "lastModified": last_modified,
             "loadError": self._load_error,

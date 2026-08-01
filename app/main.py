@@ -17,6 +17,8 @@ async def lifespan(app: FastAPI):
     app.state.knowledge_service = KnowledgeService(
         settings.knowledge_base_path,
         settings.knowledge_top_k,
+        storage_dir=settings.knowledge_base_dir,
+        max_upload_bytes=settings.knowledge_max_upload_bytes,
     )
     app.state.knowledge_service.reload_if_changed(force=True)
     app.state.glm_service = GlmService(settings)

@@ -25,6 +25,11 @@ class KnowledgeSchemaTest(unittest.TestCase):
         payload = event.model_dump(by_alias=True, exclude_none=True)
         self.assertEqual(payload["requestId"], "diagnosis-2")
 
+    def test_route_event_is_supported(self):
+        event = KnowledgeEvent(type="route", content="direct")
+
+        self.assertEqual(event.type, "route")
+
 
 if __name__ == "__main__":
     unittest.main()

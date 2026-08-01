@@ -15,6 +15,7 @@ class KnowledgeRequest(BaseModel):
 
 
 class KnowledgeSource(BaseModel):
+    document: str
     chapter: str
     section: str
     entry_id: str | None = Field(default=None, serialization_alias="entryId")
@@ -27,6 +28,7 @@ class KnowledgeEvent(BaseModel):
     type: Literal[
         "connected",
         "status",
+        "route",
         "sources",
         "delta",
         "done",

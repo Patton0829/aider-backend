@@ -90,8 +90,21 @@ ws://127.0.0.1:8000/ws/agent
 
 ## 故障诊断知识问答
 
-知识库默认读取仓库根目录的 `列车故障诊断经验知识库.md`，可通过
-`KNOWLEDGE_BASE_PATH` 覆盖。GLM 使用 OpenAI 兼容接口，配置见 `.env.example`。
+首次启动时，服务会把仓库根目录的 `列车故障诊断经验知识库.md` 复制到
+`KNOWLEDGE_BASE_DIR`，之后从该目录加载所有 `.md`、`.markdown` 和 `.txt`
+文档。上传或删除文档后会立即重建检索索引。GLM 使用 OpenAI 兼容接口，
+配置见 `.env.example`。
+
+知识库管理接口：
+
+```text
+GET    /api/knowledge/info
+POST   /api/knowledge/documents?filename=补充知识库.md
+DELETE /api/knowledge/documents/补充知识库.md
+```
+
+上传接口的请求体是 UTF-8 文档原始字节，`Content-Type` 使用
+`application/octet-stream`，默认单文件上限为 10MB。
 
 连接：
 
@@ -108,7 +121,9 @@ ws://127.0.0.1:8000/ws/knowledge
 }
 ```
 
-服务依次发送 `status`、`sources`、`delta`、`done` 和 `ready` 事件。
+服务先判断问题是否需要知识库，并发送 `route` 事件（`knowledge` 或
+`direct`）。知识库模式继续发送 `sources`；直接回答模式则跳过检索，由 GLM
+直接流式作答。两种模式都会发送 `status`、`delta`、`done` 和 `ready` 事件。
 发送 `{"type":"clear"}` 可清空当前连接的对话上下文。
 
 ## 算法日志 WebSocket
