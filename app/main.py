@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
+from app.code_conversion import CodeConversionService
 from app.core.config import get_settings
 from app.services.aider import AiderSessionManager
 from app.services.glm import GlmService
@@ -22,10 +23,15 @@ async def lifespan(app: FastAPI):
     )
     app.state.knowledge_service.reload_if_changed(force=True)
     app.state.glm_service = GlmService(settings)
+    app.state.code_conversion_service = CodeConversionService(
+        settings, app.state.glm_service.client
+    )
+    await app.state.code_conversion_service.recover_incomplete_jobs()
     try:
         yield
     finally:
         await app.state.aider_sessions.close_all()
+        await app.state.code_conversion_service.close()
         await app.state.glm_service.close()
 
 

@@ -1,15 +1,18 @@
 # Aider Agent Backend
 
-中心云控制台的 FastAPI 智能体后端，包含三条独立实时通道：
+中心云控制台的 FastAPI 智能体后端，包含故障问答、代码智能体、作业日志和
+算法代码语言转换能力：
 
 - `/ws/agent`：千问聊天与 aider 代码修改。
 - `/ws/jobs/{job_id}/logs`：Slurm 算法日志增量推送。
 - `/ws/knowledge`：检索列车故障诊断知识库并调用 GLM 流式回答。
+- `/api/code-conversion/jobs/{id}`：识别算法入口语言并把非 Python 项目转换为 Python。
 
 ## 目录
 
 ```text
 app/
+  code_conversion/  安全解压、语言识别、多文件转写和异步任务实现
   api/routes/       HTTP 和 WebSocket 路由
   core/             配置和鉴权
   schemas/          消息协议
@@ -48,6 +51,24 @@ curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/api/models
 curl http://127.0.0.1:8000/api/knowledge/info
 ```
+
+## 算法代码语言转换
+
+中心云后端以 `application/zip` 原始请求体提交算法包，Aider 在后台安全解压并
+读取 `algorithm.json` 的 `entry`。入口为合法 `.py` 文件时直接完成；C/C++、
+Java、Go、Rust、TypeScript 或 JavaScript 源码会在保留多文件上下文的情况下
+调用 GLM 转成 Python，并生成新的算法 ZIP。
+
+```text
+POST   /api/code-conversion/jobs/{id}?filename=algorithm.zip
+GET    /api/code-conversion/jobs/{id}
+GET    /api/code-conversion/jobs/{id}/artifact
+DELETE /api/code-conversion/jobs/{id}
+```
+
+任务状态依次为 `queued`、`extracting`、`detecting`、`converting`、
+`validating`、`packaging`、`completed`；失败时为 `failed`。生产环境配置了
+`AGENT_API_TOKEN` 时，中心云后端需要用 Bearer Token 调用这些内部接口。
 
 ## Agent WebSocket 协议
 

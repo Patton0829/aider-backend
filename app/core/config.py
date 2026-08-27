@@ -22,6 +22,20 @@ class Settings(BaseModel):
     glm_max_concurrency: int = Field(default=2, ge=1)
     glm_temperature: float = Field(default=0.2, ge=0, le=2)
 
+    code_conversion_storage_dir: Path = PROJECT_ROOT / "storage" / "code-conversion"
+    code_conversion_max_upload_bytes: int = Field(
+        default=512 * 1024 * 1024, ge=1024
+    )
+    code_conversion_max_source_bytes: int = Field(
+        default=2 * 1024 * 1024, ge=1024
+    )
+    code_conversion_max_source_files: int = Field(default=32, ge=1, le=256)
+    code_conversion_model: str = "glm"
+    code_conversion_max_tokens: int = Field(default=12000, ge=1024)
+    code_conversion_timeout_seconds: float = Field(default=180.0, gt=0)
+    code_conversion_max_concurrency: int = Field(default=1, ge=1, le=8)
+    code_conversion_temperature: float = Field(default=0.1, ge=0, le=2)
+
     knowledge_base_path: Path = PROJECT_ROOT / "列车故障诊断经验知识库.md"
     knowledge_base_dir: Path = PROJECT_ROOT / "knowledge-bases"
     knowledge_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
@@ -35,7 +49,7 @@ class Settings(BaseModel):
 
     workspace_root: Path = Path("/Users/patton/system")
     allowed_workspaces: str = (
-        "control-center-fe,control-center-be,transfer,communicate,aider-backend"
+        "control-center-fe,control-center-be,transfer,communicate,aider-backend,code"
     )
 
     job_workspace_root: Path = Path("/home/mec-share-dc")
