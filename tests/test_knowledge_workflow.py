@@ -245,6 +245,57 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.llm.calls, [("direct", "你好", [])])
         self.assertEqual(self.data(events, "metrics")["answerMode"], "direct")
 
+    async def test_recall_uses_previous_turns_without_retrieval_or_topic_reset(self):
+        first = "转辙机动作超时，可能有哪些原因？"
+        second = "那如何区分机械阻力和供电问题？"
+        session = self.data(await self.run_question(first), "_complete")
+        session = self.data(await self.run_question(second, session), "_complete")
+        queries = list(self.retriever.queries)
+        self.llm.calls.clear()
+        events = await self.run_question("我刚刚问了你什么问题", session)
+        self.assertEqual(self.retriever.queries, queries)
+        self.assertEqual([c[0] for c in self.llm.calls], ["direct"])
+        self.assertEqual([m["content"] for m in self.llm.calls[0][-1] if m["role"] == "user"], [first, second])
+        saved = self.data(events, "_complete")
+        self.assertEqual(saved["topic"], first)
+        self.assertEqual(saved["last_mode"], "knowledge")
+        self.assertEqual(len(saved["history"]), 6)
+        self.assertTrue(self.data(events, "metrics")["conversationRecall"])
+        follow = await self.run_question("那电流有什么特征？", saved)
+        self.assertEqual(self.data(follow, "metrics")["answerMode"], "knowledge")
+        self.assertIn(first, self.retriever.queries[-1])
+
+    async def test_recall_phrasings_bypass_retrieval_even_with_diagnostic_words(self):
+        initial = self.data(await self.run_question(), "_complete")
+        for question in ("刚才我问的问题是什么？", "我之前问的问题是什么？",
+                         "总结前面的对话", "你还记得我问的转辙机故障吗？",
+                         "我刚刚说了什么？", "重复上一条问题"):
+            with self.subTest(question=question):
+                queries = list(self.retriever.queries)
+                events = await self.run_question(question, initial)
+                self.assertEqual(self.retriever.queries, queries)
+                self.assertEqual(self.llm.calls[-1], ("direct", question, initial["history"]))
+                self.assertEqual(self.data(events, "metrics")["answerMode"], "direct")
+
+    async def test_recall_in_new_conversation_has_no_other_session_history(self):
+        await self.run_question()
+        events = await self.run_question("我刚刚问了你什么问题")
+        self.assertEqual(self.llm.calls[-1], ("direct", "我刚刚问了你什么问题", []))
+        saved = self.data(events, "_complete")
+        self.assertEqual(len(saved["history"]), 2)
+        self.assertEqual(saved["topic"], "")
+        self.assertIsNone(saved["last_mode"])
+
+    async def test_diagnostic_questions_are_not_mistaken_for_conversation_recall(self):
+        initial = self.data(await self.run_question(), "_complete")
+        for question in ("你说什么情况下会出现转辙机故障？", "总结转辙机锁闭故障的原因",
+                         "我刚才问的转辙机故障应该怎么排查？"):
+            with self.subTest(question=question):
+                events = await self.run_question(question, initial)
+                metrics = self.data(events, "metrics")
+                self.assertFalse(metrics["conversationRecall"])
+                self.assertEqual(metrics["answerMode"], "knowledge")
+
     async def test_missing_citation_warns_in_answer_and_validation(self):
         self.llm.fragments = ["机械磨损。"]
         events = await self.run_question()

@@ -74,6 +74,25 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["turns"][0]["sources"][0]["kbVersion"], "b" * 64)
         self.assertEqual(result["state"]["topic"], "转辙机锁闭异常")
 
+    async def test_conversation_recall_restores_completed_turns_from_database(self):
+        llm, retriever = FakeLlm(), FakeRetriever()
+        workflow = KnowledgeWorkflow(self.settings, KnowledgeService(Path(self.temp.name) / "unused.md"), llm, retriever)
+        questions = ["转辙机锁闭故障", "那电流呢？", "我刚刚问了你什么问题"]
+        for number, question in enumerate(questions):
+            # A new session per request forces checkpoint recovery from the DB.
+            session = ConversationSession(self.store)
+            request = KnowledgeRequest(question=question, requestId=f"recall-{number}",
+                                       conversationId=self.identity, ownerToken=self.token)
+            events = [event async for event in session.stream(workflow, request)]
+            self.assertTrue(events[-1]["data"]["persisted"])
+        self.assertEqual(llm.calls[-1][0], "direct")
+        history = llm.calls[-1][-1]
+        self.assertEqual([m["content"] for m in history if m["role"] == "user"], questions[:2])
+        restored = await self.store.restore(self.owner, self.identity)
+        self.assertEqual(len(restored["turns"]), 3)
+        self.assertEqual(restored["state"]["topic"], questions[0])
+        self.assertEqual(restored["state"]["last_mode"], "knowledge")
+
     async def test_owner_isolation_for_read_list_clear_delete_and_begin(self):
         other = owner_hash(uuid.uuid4().hex)
         self.assertEqual((await self.store.list(other))["conversations"], [])
@@ -229,7 +248,7 @@ class HistoryApiTests(unittest.TestCase):
                 self.assertEqual(client.get("/api/knowledge/conversations").status_code, 401)
                 identity = client.post("/api/knowledge/conversations", headers=headers).json()["id"]
                 self.assertEqual(client.get(f"/api/knowledge/conversations/{identity}", headers={**headers, "X-Conversation-Token": "b" * 64}).status_code, 404)
-                for question, request_id in [("转辙机锁闭故障", "first"), ("那电流呢？", "second")]:
+                for question, request_id in [("转辙机锁闭故障", "first"), ("那电流呢？", "second"), ("我刚刚问了你什么问题", "recall")]:
                     with client.websocket_connect("/ws/knowledge?token=test-service") as socket:
                         socket.receive_json(); socket.receive_json()
                         socket.send_json({"type": "resume", "conversationId": identity, "ownerToken": token, "requestId": "restore"})
@@ -251,8 +270,15 @@ class HistoryApiTests(unittest.TestCase):
                             self.assertEqual(next(e["sources"] for e in replay if e["type"] == "sources")[0]["entryId"], "SW-021")
                         if request_id == "second":
                             self.assertTrue(next(e["data"] for e in events if e["type"] == "metrics")["followUp"])
+                        if request_id == "recall":
+                            metrics = next(e["data"] for e in events if e["type"] == "metrics")
+                            self.assertEqual(metrics["answerMode"], "direct")
+                            self.assertTrue(metrics["conversationRecall"])
+                            history = app.state.knowledge_llm_service.calls[-1][-1]
+                            self.assertEqual([m["content"] for m in history if m["role"] == "user"], ["转辙机锁闭故障", "那电流呢？"])
+                            self.assertTrue(next(e["data"] for e in events if e["type"] == "done")["persisted"])
                 saved = client.get(f"/api/knowledge/conversations/{identity}", headers=headers).json()
-                self.assertEqual(len(saved["turns"]), 2)
+                self.assertEqual(len(saved["turns"]), 3)
                 self.assertNotIn("state", saved)
                 self.assertEqual(client.delete(f"/api/knowledge/conversations/{identity}", headers=headers).status_code, 200)
                 self.assertEqual(client.get(f"/api/knowledge/conversations/{identity}", headers=headers).status_code, 404)

@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.services.citation_guard import CitationGuard
 from app.services.knowledge import (
     ENTRY_ID_RE, KnowledgeSearchResult, KnowledgeService,
-    is_contextual_follow_up, should_retrieve_knowledge,
+    is_contextual_follow_up, is_conversation_recall, should_retrieve_knowledge,
 )
 
 
@@ -26,6 +26,7 @@ class QuestionState(TypedDict, total=False):
     topic: str
     last_mode: str | None
     follow_up: bool
+    conversation_recall: bool
     mode: str
     query: str
     rewrite: str
@@ -79,18 +80,22 @@ class KnowledgeWorkflow:
         started = time.perf_counter()
         question, history = state["question"], state.get("history", [])
         topic = state.get("topic", "")
-        follow_up = bool(history) and is_contextual_follow_up(question)
+        recall = is_conversation_recall(question)
+        follow_up = bool(history) and (recall or is_contextual_follow_up(question))
         # Explicitly naming a different equipment family starts a fresh topic.
         previous_equipment = {n for n, terms in enumerate(EQUIPMENT) if any(term in topic for term in terms)}
         current_equipment = {n for n, terms in enumerate(EQUIPMENT) if any(term in question for term in terms)}
-        if current_equipment and previous_equipment and not current_equipment & previous_equipment:
+        if not recall and current_equipment and previous_equipment and not current_equipment & previous_equipment:
             follow_up = False
-        if follow_up and state.get("last_mode") == "direct" and should_retrieve_knowledge(question):
+        if not recall and follow_up and state.get("last_mode") == "direct" and should_retrieve_knowledge(question):
             follow_up = False
-        mode = (state.get("last_mode") or "direct") if follow_up else (
-            "knowledge" if should_retrieve_knowledge(question) else "direct"
-        )
-        if not follow_up:
+        if recall:
+            mode = "direct"
+        elif follow_up:
+            mode = state.get("last_mode") or "direct"
+        else:
+            mode = "knowledge" if should_retrieve_knowledge(question) else "direct"
+        if not follow_up and not recall:
             history, topic = [], question
         query, method = question, "standalone"
         emit("route", mode)
@@ -106,7 +111,7 @@ class KnowledgeWorkflow:
                     method = "model"
                 except Exception as error:
                     logger.warning("RAG follow-up rewrite fallback (%s)", type(error).__name__)
-        return {"history": history, "topic": topic, "follow_up": follow_up, "mode": mode,
+        return {"history": history, "topic": topic, "follow_up": follow_up, "conversation_recall": recall, "mode": mode,
                 "query": query, "rewrite": method, "timings": timed(state, "conversationMs", started)}
 
     async def retrieve(self, state: QuestionState):
@@ -224,11 +229,13 @@ class KnowledgeWorkflow:
         history = history[-limit:] if limit else []
         metrics = {**state["timings"], **state.get("retrieval_trace", {}), "firstContentMs": state.get("first_content_ms"),
                    "totalMs": round((time.perf_counter() - state["started"]) * 1000, 2),
-                   "followUp": state["follow_up"], "rewrite": state["rewrite"],
+                   "followUp": state["follow_up"], "conversationRecall": state["conversation_recall"], "rewrite": state["rewrite"],
                    "answerMode": state["mode"], "assessment": state.get("assessment_reason", "not_applicable"),
                    "indexVersions": sorted({r.kb_version for r in state.get("results", []) if r.kb_version}),
                    "citationPassed": state["validation"]["passed"]}
         emit("metrics", data=metrics)
         logger.info("RAG workflow timings: %s", metrics)
-        emit("_complete", data={"history": history, "topic": state["topic"], "last_mode": state["mode"]})
+        # Recalling the conversation must not replace the diagnostic topic/route.
+        last_mode = state.get("last_mode") if state["conversation_recall"] else state["mode"]
+        emit("_complete", data={"history": history, "topic": state["topic"], "last_mode": last_mode})
         return {}

@@ -60,6 +60,13 @@ CONTEXTUAL_FOLLOW_UP_PREFIXES = (
     "下一步",
     "继续",
 )
+CONVERSATION_RECALL_PATTERNS = tuple(re.compile(pattern) for pattern in (
+    r"(?:我|我们|你|您)(?:刚刚|刚才|之前|前面|上次|先前|曾经|刚)(?:都)?(?:问|说|提|聊|讨论)(?:了|过)?(?:你|您)?(?:什么|哪些|啥)",
+    r"(?:我|我们|你|您)(?:问|说|提|聊|讨论)(?:了|过)(?:你|您)?(?:什么|哪些|啥)",
+    r"(?:上一[条轮个次]|刚才|刚刚|之前|前面|先前).{0,8}(?:问题|消息|对话|聊天|提问).{0,8}(?:什么|哪些|总结|回顾|复述|记得)",
+    r"(?:总结|回顾|复述|重复|列出).{0,8}(?:对话|聊天|提问|问过的问题|(?:上一[条轮个次]|刚才|刚刚|之前|前面).{0,4}(?:问题|消息))",
+    r"还记得.{0,10}(?:问|说|聊)",
+))
 
 
 class KnowledgeUnavailableError(RuntimeError):
@@ -84,6 +91,11 @@ def is_contextual_follow_up(question: str) -> bool:
         normalized.startswith(prefix)
         for prefix in CONTEXTUAL_FOLLOW_UP_PREFIXES
     )
+
+
+def is_conversation_recall(question: str) -> bool:
+    normalized = "".join(question.split())
+    return any(pattern.search(normalized) for pattern in CONVERSATION_RECALL_PATTERNS)
 
 
 def should_retrieve_knowledge(question: str) -> bool:
