@@ -22,6 +22,10 @@ class KnowledgeSource(BaseModel):
     line_start: int = Field(serialization_alias="lineStart")
     line_end: int = Field(serialization_alias="lineEnd")
     score: float
+    chunk_id: str | None = Field(default=None, serialization_alias="chunkId")
+    document_id: str | None = Field(default=None, serialization_alias="documentId")
+    content_hash: str | None = Field(default=None, serialization_alias="contentHash")
+    kb_version: str | None = Field(default=None, serialization_alias="kbVersion")
 
 
 class KnowledgeEvent(BaseModel):

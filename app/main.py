@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,9 @@ from app.core.config import get_settings
 from app.services.aider import AiderSessionManager
 from app.services.glm import GlmService
 from app.services.knowledge import KnowledgeService
+from app.services.knowledge_llm import KnowledgeLlmService
+from app.services.rag_models import DashScopeRetrievalModels
+from app.services.rag_pipeline import RagPipeline
 
 
 @asynccontextmanager
@@ -23,15 +27,43 @@ async def lifespan(app: FastAPI):
     )
     app.state.knowledge_service.reload_if_changed(force=True)
     app.state.glm_service = GlmService(settings)
-    app.state.code_conversion_service = CodeConversionService(
-        settings, app.state.glm_service.client
-    )
-    await app.state.code_conversion_service.recover_incomplete_jobs()
+    knowledge_llm = app.state.glm_service
+    conversion_service = None
+    retrieval_models = None
+    retriever = None
     try:
+        if settings.knowledge_retrieval_mode != "keyword" or settings.knowledge_rerank_enabled:
+            retrieval_models = DashScopeRetrievalModels(settings)
+        retriever = RagPipeline(
+            app.state.knowledge_service, settings,
+            embedder=retrieval_models if settings.knowledge_retrieval_mode != "keyword" else None,
+            reranker=retrieval_models if settings.knowledge_rerank_enabled else None,
+        )
+        app.state.knowledge_retriever = retriever
+        try:
+            await retriever.prepare_index()
+        except Exception as error:
+            logging.getLogger("uvicorn.error").warning(
+                "RAG index initialization failed (%s); retrieval status is unavailable",
+                type(error).__name__,
+            )
+        if settings.knowledge_provider == "qwen":
+            knowledge_llm = KnowledgeLlmService(settings)
+        app.state.knowledge_llm_service = knowledge_llm
+        conversion_service = CodeConversionService(settings, app.state.glm_service.client)
+        app.state.code_conversion_service = conversion_service
+        await conversion_service.recover_incomplete_jobs()
         yield
     finally:
         await app.state.aider_sessions.close_all()
-        await app.state.code_conversion_service.close()
+        if conversion_service is not None:
+            await conversion_service.close()
+        if knowledge_llm is not app.state.glm_service:
+            await knowledge_llm.close()
+        if retrieval_models is not None:
+            await retrieval_models.close()
+        if retriever is not None:
+            await retriever.close()
         await app.state.glm_service.close()
 
 

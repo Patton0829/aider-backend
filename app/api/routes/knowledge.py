@@ -2,9 +2,9 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, W
 from pydantic import ValidationError
 
 from app.core.config import get_settings
-from app.core.security import authorize_websocket
+from app.core.security import authorize_http, authorize_websocket
 from app.schemas.knowledge import KnowledgeEvent, KnowledgeRequest, KnowledgeSource
-from app.services.glm import GlmService
+from app.services.knowledge_llm import KnowledgeLlmService
 from app.services.knowledge import (
     KnowledgeDocumentConflictError,
     KnowledgeDocumentNotFoundError,
@@ -17,6 +17,34 @@ from app.services.knowledge import (
 
 
 router = APIRouter()
+
+
+def knowledge_payload(request: Request) -> dict:
+    settings = get_settings()
+    payload = {
+        **request.app.state.knowledge_service.info(),
+        "model": settings.knowledge_model,
+        "provider": settings.knowledge_provider,
+    }
+    retriever = getattr(request.app.state, "knowledge_retriever", None)
+    if retriever is not None:
+        payload.update(retriever.info())
+        payload["ready"] = payload["ready"] and payload["retrievalReady"]
+        payload["loadError"] = payload["loadError"] or payload["retrievalError"]
+        if payload["chunkCount"] and not payload["retrievalReady"] and not payload["loadError"]:
+            payload["loadError"] = "向量索引待更新，下一次检索时自动构建"
+    return payload
+
+
+async def refresh_retrieval(request: Request):
+    retriever = getattr(request.app.state, "knowledge_retriever", None)
+    if retriever is not None:
+        try:
+            await retriever.prepare_index()
+        except Exception:
+            # Document writes succeeded; report index failure explicitly in the payload.
+            # A later retrieval can retry the missing vectors without re-embedding cached ones.
+            pass
 
 
 async def send_event(
@@ -41,11 +69,46 @@ def source_models(results: list[KnowledgeSearchResult]) -> list[KnowledgeSource]
 
 @router.get("/api/knowledge/info")
 async def knowledge_info(request: Request):
-    service: KnowledgeService = request.app.state.knowledge_service
-    return {
-        **service.info(),
-        "model": get_settings().glm_model,
-    }
+    return knowledge_payload(request)
+
+
+@router.get("/api/knowledge/indexes")
+async def knowledge_indexes(request: Request):
+    authorize_http(request)
+    retriever = request.app.state.knowledge_retriever
+    return {"activeVersion": retriever.info().get("indexVersion"), "versions": retriever.index_versions()}
+
+
+@router.post("/api/knowledge/indexes/rebuild")
+async def rebuild_knowledge_index(request: Request):
+    authorize_http(request)
+    try:
+        await request.app.state.knowledge_retriever.rebuild_index()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="索引构建失败，原发布版本保持不变") from error
+    return knowledge_payload(request)
+
+
+@router.post("/api/knowledge/indexes/{version}/activate")
+async def activate_knowledge_index(version: str, request: Request):
+    authorize_http(request)
+    try:
+        await request.app.state.knowledge_retriever.activate_index(version)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return knowledge_payload(request)
+
+
+@router.get("/api/knowledge/indexes/{version}/chunks/{chunk_id}")
+async def knowledge_index_chunk(version: str, chunk_id: str, request: Request):
+    authorize_http(request)
+    publisher = request.app.state.knowledge_retriever.publisher
+    chunk = publisher.get_chunk(version, chunk_id) if publisher else None
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="指定版本中的片段不存在")
+    return chunk
 
 
 @router.post("/api/knowledge/documents", status_code=201)
@@ -61,9 +124,9 @@ async def upload_knowledge_document(
         raise HTTPException(status_code=409, detail=str(error)) from error
     except KnowledgeValidationError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    await refresh_retrieval(request)
     return {
-        **service.info(),
-        "model": get_settings().glm_model,
+        **knowledge_payload(request),
         "uploaded": document,
     }
 
@@ -72,14 +135,14 @@ async def upload_knowledge_document(
 async def delete_knowledge_document(document_name: str, request: Request):
     service: KnowledgeService = request.app.state.knowledge_service
     try:
-        info = service.delete_document(document_name)
+        service.delete_document(document_name)
     except KnowledgeDocumentNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except KnowledgeValidationError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    await refresh_retrieval(request)
     return {
-        **info,
-        "model": get_settings().glm_model,
+        **knowledge_payload(request),
         "deleted": document_name,
     }
 
@@ -92,7 +155,7 @@ async def knowledge_socket(websocket: WebSocket):
 
     settings = get_settings()
     knowledge: KnowledgeService = websocket.app.state.knowledge_service
-    glm: GlmService = websocket.app.state.glm_service
+    llm: KnowledgeLlmService = websocket.app.state.knowledge_llm_service
     history: list[dict[str, str]] = []
     last_answer_mode: str | None = None
 
@@ -183,7 +246,11 @@ async def knowledge_socket(websocket: WebSocket):
                         "正在检索故障诊断知识库",
                         request_id=request_id,
                     )
-                    results = knowledge.search(retrieval_query)
+                    retriever = getattr(websocket.app.state, "knowledge_retriever", None)
+                    results = (
+                        await retriever.search(retrieval_query)
+                        if retriever is not None else knowledge.search(retrieval_query)
+                    )
                     if not results:
                         answer = (
                             "当前知识库中没有足够信息。"
@@ -205,11 +272,11 @@ async def knowledge_socket(websocket: WebSocket):
                         await send_event(
                             websocket,
                             "status",
-                            "GLM 正在分析检索结果",
+                            f"{llm.model_label} 正在分析检索结果",
                             request_id=request_id,
                         )
                         context = knowledge.format_context(results)
-                        async for delta in glm.stream_answer(
+                        async for delta in llm.stream_answer(
                             question, context, history
                         ):
                             answer += delta
@@ -223,10 +290,10 @@ async def knowledge_socket(websocket: WebSocket):
                     await send_event(
                         websocket,
                         "status",
-                        "当前问题无需检索，GLM 正在直接回答",
+                        f"当前问题无需检索，{llm.model_label} 正在直接回答",
                         request_id=request_id,
                     )
-                    async for delta in glm.stream_direct_answer(question, history):
+                    async for delta in llm.stream_direct_answer(question, history):
                         answer += delta
                         await send_event(
                             websocket,

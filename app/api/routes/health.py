@@ -12,6 +12,8 @@ async def health():
     return {
         "status": "ok",
         "dashscopeConfigured": bool(settings.dashscope_api_key),
+        "knowledgeProvider": settings.knowledge_provider,
+        "knowledgeModel": settings.knowledge_model,
         "aiderSourceExists": settings.aider_source_root.is_dir(),
         "jobWorkspaceRoot": str(settings.job_workspace_root),
     }

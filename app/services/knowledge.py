@@ -1,7 +1,10 @@
 import math
+import hashlib
+import json
 import os
 import re
 import shutil
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -102,6 +105,14 @@ class KnowledgeChunk:
     line_end: int
 
     @property
+    def document_id(self) -> str:
+        return hashlib.sha256(unicodedata.normalize("NFC", self.document).encode()).hexdigest()
+
+    @property
+    def content_hash(self) -> str:
+        return hashlib.sha256(self.content.encode()).hexdigest()
+
+    @property
     def source_label(self) -> str:
         parts = [part for part in (self.chapter, self.section, self.entry_id) if part]
         return " / ".join(parts)
@@ -111,6 +122,7 @@ class KnowledgeChunk:
 class KnowledgeSearchResult:
     chunk: KnowledgeChunk
     score: float
+    kb_version: str | None = None
 
     def source_dict(self) -> dict[str, str | int | float | None]:
         return {
@@ -121,6 +133,10 @@ class KnowledgeSearchResult:
             "line_start": self.chunk.line_start,
             "line_end": self.chunk.line_end,
             "score": round(self.score, 4),
+            "chunk_id": self.chunk.chunk_id,
+            "document_id": self.chunk.document_id,
+            "content_hash": self.chunk.content_hash,
+            "kb_version": self.kb_version,
         }
 
 
@@ -160,15 +176,23 @@ def parse_markdown(text: str, document: str = "") -> list[KnowledgeChunk]:
     table_headers: list[str] | None = None
     buffer: list[str] = []
     buffer_start = 0
+    occurrences: Counter[str] = Counter()
 
     def append_chunk(content: str, line_start: int, line_end: int):
         content = content.strip()
         if not content:
             return
         entry_match = ENTRY_ID_RE.search(content)
+        identity = json.dumps([
+            "chunk-id-v2", unicodedata.normalize("NFC", document), chapter, section,
+            entry_match.group(0).upper() if entry_match else None,
+            re.sub(r"\s+", " ", content).strip(),
+        ], ensure_ascii=False)
+        occurrences[identity] += 1
+        chunk_id = hashlib.sha256(f"{identity}\0{occurrences[identity]}".encode()).hexdigest()
         chunks.append(
             KnowledgeChunk(
-                chunk_id=f"{document or 'knowledge'}:chunk-{len(chunks) + 1}",
+                chunk_id=chunk_id,
                 document=document,
                 chapter=chapter,
                 section=section,
@@ -239,6 +263,73 @@ def parse_markdown(text: str, document: str = "") -> list[KnowledgeChunk]:
     return chunks
 
 
+class Bm25Index:
+    """Immutable lexical index shared by one published knowledge snapshot."""
+    def __init__(self, chunks: tuple[KnowledgeChunk, ...]):
+        self.chunks = chunks
+        self._term_counts = [
+            Counter(_tokens(f"{chunk.document} {chunk.chapter} {chunk.section} {chunk.content}"))
+            for chunk in chunks
+        ]
+        self._document_frequency: Counter[str] = Counter()
+        for counts in self._term_counts:
+            self._document_frequency.update(counts.keys())
+        self._average_length = (
+            sum(sum(counts.values()) for counts in self._term_counts) / len(chunks)
+            if chunks else 0.0
+        )
+
+    def search(self, query: str, top_k: int = 5) -> list[KnowledgeSearchResult]:
+        query = query.strip()
+        if not query:
+            return []
+
+        query_terms = Counter(_tokens(query))
+        query_entry_ids = {match.group(0).upper() for match in ENTRY_ID_RE.finditer(query)}
+        query_compact = _compact(query)
+        document_count = len(self.chunks)
+        average_length = self._average_length or 1.0
+        results: list[KnowledgeSearchResult] = []
+
+        for chunk, counts in zip(self.chunks, self._term_counts):
+            document_length = sum(counts.values()) or 1
+            score = 0.0
+            for term, query_frequency in query_terms.items():
+                frequency = counts.get(term, 0)
+                if not frequency:
+                    continue
+                document_frequency = self._document_frequency[term]
+                inverse_document_frequency = math.log(
+                    1 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5)
+                )
+                denominator = frequency + 1.5 * (
+                    1 - 0.75 + 0.75 * document_length / average_length
+                )
+                score += query_frequency * inverse_document_frequency * frequency * 2.5 / denominator
+
+            if chunk.entry_id and chunk.entry_id in query_entry_ids:
+                score += 100.0
+
+            title_compact = _compact(f"{chunk.document}{chunk.chapter}{chunk.section}")
+            content_compact = _compact(chunk.content)
+            if len(query_compact) >= 2 and query_compact in content_compact:
+                score += 8.0
+            if len(query_compact) >= 2 and query_compact in title_compact:
+                score += 5.0
+
+            if score > 0:
+                results.append(KnowledgeSearchResult(chunk=chunk, score=score))
+
+        results.sort(
+            key=lambda item: (
+                -item.score,
+                item.chunk.document.lower(),
+                item.chunk.line_start,
+            )
+        )
+        return results[:top_k]
+
+
 class KnowledgeService:
     def __init__(
         self,
@@ -252,9 +343,7 @@ class KnowledgeService:
         self.top_k = top_k
         self.max_upload_bytes = max_upload_bytes
         self.chunks: list[KnowledgeChunk] = []
-        self._term_counts: list[Counter[str]] = []
-        self._document_frequency: Counter[str] = Counter()
-        self._average_length = 0.0
+        self._keyword_index = Bm25Index(())
         self._mtime_ns: int | None = None
         self._signature: tuple[tuple[str, int, int], ...] | None = None
         self._load_error: str | None = None
@@ -313,26 +402,8 @@ class KnowledgeService:
         documents: list[dict[str, str | int]],
         signature: tuple[tuple[str, int, int], ...],
     ):
-        term_counts = [
-            Counter(
-                _tokens(
-                    f"{chunk.document} {chunk.chapter} {chunk.section} {chunk.content}"
-                )
-            )
-            for chunk in chunks
-        ]
-        document_frequency: Counter[str] = Counter()
-        for counts in term_counts:
-            document_frequency.update(counts.keys())
-
         self.chunks = chunks
-        self._term_counts = term_counts
-        self._document_frequency = document_frequency
-        self._average_length = (
-            sum(sum(counts.values()) for counts in term_counts) / len(chunks)
-            if chunks
-            else 0.0
-        )
+        self._keyword_index = Bm25Index(tuple(chunks))
         self._documents = documents
         self._signature = signature
         self._mtime_ns = max((item[1] for item in signature), default=None)
@@ -371,54 +442,12 @@ class KnowledgeService:
 
     def search(self, query: str, top_k: int | None = None) -> list[KnowledgeSearchResult]:
         self._ensure_ready()
-        query = query.strip()
-        if not query:
-            return []
+        return self._keyword_index.search(query, top_k or self.top_k)
 
-        query_terms = Counter(_tokens(query))
-        query_entry_ids = {match.group(0).upper() for match in ENTRY_ID_RE.finditer(query)}
-        query_compact = _compact(query)
-        document_count = len(self.chunks)
-        average_length = self._average_length or 1.0
-        results: list[KnowledgeSearchResult] = []
-
-        for chunk, counts in zip(self.chunks, self._term_counts):
-            document_length = sum(counts.values()) or 1
-            score = 0.0
-            for term, query_frequency in query_terms.items():
-                frequency = counts.get(term, 0)
-                if not frequency:
-                    continue
-                document_frequency = self._document_frequency[term]
-                inverse_document_frequency = math.log(
-                    1 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5)
-                )
-                denominator = frequency + 1.5 * (
-                    1 - 0.75 + 0.75 * document_length / average_length
-                )
-                score += query_frequency * inverse_document_frequency * frequency * 2.5 / denominator
-
-            if chunk.entry_id and chunk.entry_id in query_entry_ids:
-                score += 100.0
-
-            title_compact = _compact(f"{chunk.document}{chunk.chapter}{chunk.section}")
-            content_compact = _compact(chunk.content)
-            if len(query_compact) >= 2 and query_compact in content_compact:
-                score += 8.0
-            if len(query_compact) >= 2 and query_compact in title_compact:
-                score += 5.0
-
-            if score > 0:
-                results.append(KnowledgeSearchResult(chunk=chunk, score=score))
-
-        results.sort(
-            key=lambda item: (
-                -item.score,
-                item.chunk.document.lower(),
-                item.chunk.line_start,
-            )
-        )
-        return results[: top_k or self.top_k]
+    def snapshot(self) -> tuple[KnowledgeChunk, ...]:
+        """Return immutable chunks for one retrieval, even if documents change later."""
+        self._ensure_ready()
+        return tuple(self.chunks)
 
     def format_context(self, results: list[KnowledgeSearchResult]) -> str:
         blocks = []

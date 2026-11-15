@@ -8,6 +8,7 @@ from app.services.glm import GlmService
 class FakeStream:
     def __init__(self, chunks):
         self.chunks = chunks
+        self.closed = False
 
     def __aiter__(self):
         return self._iterate()
@@ -15,6 +16,9 @@ class FakeStream:
     async def _iterate(self):
         for chunk in self.chunks:
             yield chunk
+
+    async def close(self):
+        self.closed = True
 
 
 class FakeCompletions:
@@ -60,6 +64,34 @@ class GlmServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output, ["锁闭装置", "可能磨损"])
         self.assertTrue(client.chat.completions.request["stream"])
         self.assertEqual(client.chat.completions.request["max_tokens"], 4096)
+        self.assertEqual(
+            client.chat.completions.request["extra_body"],
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        self.assertTrue(client.chat.completions.stream.closed)
+
+    async def test_can_enable_thinking_explicitly(self):
+        client = FakeClient([chunk(content="诊断依据")])
+        service = GlmService(Settings(glm_enable_thinking=True), client=client)
+
+        _ = [item async for item in service.stream_direct_answer("问题", [])]
+
+        self.assertTrue(
+            client.chat.completions.request["extra_body"]["chat_template_kwargs"][
+                "enable_thinking"
+            ]
+        )
+
+    async def test_closing_generator_closes_upstream_stream_and_releases_slot(self):
+        client = FakeClient([chunk(content="第一段"), chunk(content="第二段")])
+        service = GlmService(Settings(glm_max_concurrency=1), client=client)
+        stream = service.stream_direct_answer("问题", [])
+
+        self.assertEqual(await anext(stream), "第一段")
+        await stream.aclose()
+
+        self.assertTrue(client.chat.completions.stream.closed)
+        self.assertFalse(service._semaphore.locked())
 
     async def test_raises_when_model_returns_only_reasoning(self):
         service = GlmService(

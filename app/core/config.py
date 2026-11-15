@@ -1,8 +1,9 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -14,9 +15,18 @@ class Settings(BaseModel):
     qwen_plus_model: str = "qwen3-coder-plus"
     qwen_flash_model: str = "qwen3-coder-flash"
 
+    knowledge_provider: Literal["glm", "qwen"] = "glm"
+    knowledge_qwen_model: str = "qwen3.8-flash"
+    knowledge_qwen_enable_thinking: bool = False
+    knowledge_qwen_max_tokens: int = Field(default=2048, ge=128)
+    knowledge_qwen_timeout_seconds: float = Field(default=60.0, gt=0)
+    knowledge_qwen_max_concurrency: int = Field(default=2, ge=1)
+    knowledge_qwen_temperature: float = Field(default=0.2, ge=0, le=2)
+
     glm_base_url: str = "http://115.190.191.103:8081/v1"
     glm_api_key: str = "not-needed"
     glm_model: str = "glm"
+    glm_enable_thinking: bool = False
     glm_max_tokens: int = Field(default=4096, ge=512)
     glm_timeout_seconds: float = Field(default=120.0, gt=0)
     glm_max_concurrency: int = Field(default=2, ge=1)
@@ -41,13 +51,29 @@ class Settings(BaseModel):
     knowledge_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     knowledge_top_k: int = Field(default=5, ge=1, le=20)
     knowledge_history_turns: int = Field(default=6, ge=0, le=20)
+    knowledge_retrieval_mode: Literal["keyword", "vector", "hybrid"] = "keyword"
+    knowledge_candidate_k: int = Field(default=20, ge=1, le=500)
+    knowledge_bm25_recall_k: int = Field(default=20, ge=1, le=500)
+    knowledge_dense_recall_k: int = Field(default=20, ge=1, le=500)
+    knowledge_rrf_k: int = Field(default=60, ge=1)
+    knowledge_embedding_model: str = "qwen3.7-text-embedding"
+    knowledge_embedding_dimensions: int = Field(default=1024, ge=1)
+    knowledge_embedding_batch_size: int = Field(default=20, ge=1, le=20)
+    knowledge_embedding_cache_path: Path = PROJECT_ROOT / "storage" / "rag" / "embeddings.sqlite3"
+    knowledge_vector_store: Literal["memory", "milvus_lite"] = "memory"
+    knowledge_milvus_uri: Path = PROJECT_ROOT / "storage" / "rag" / "milvus.db"
+    knowledge_index_catalog_path: Path = PROJECT_ROOT / "storage" / "rag" / "index_catalog.sqlite3"
+    knowledge_rerank_enabled: bool = False
+    knowledge_rerank_model: str = "qwen3.7-text-rerank"
+    knowledge_retrieval_timeout_seconds: float = Field(default=30.0, gt=0)
+    dashscope_http_base_url: str = ""
 
-    aider_source_root: Path = Path("/Users/patton/system/aider")
+    aider_source_root: Path = PROJECT_ROOT.parent / "aider"
     aider_model: str = "openai/qwen3-coder-plus"
     aider_edit_format: str = "diff"
     aider_auto_commits: bool = False
 
-    workspace_root: Path = Path("/Users/patton/system")
+    workspace_root: Path = PROJECT_ROOT.parent
     allowed_workspaces: str = (
         "control-center-fe,control-center-be,transfer,communicate,aider-backend,code"
     )
@@ -57,8 +83,21 @@ class Settings(BaseModel):
     job_log_max_initial_bytes: int = Field(default=65536, ge=0)
 
     agent_api_token: str = ""
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:8088,http://127.0.0.1:8088"
+    )
     log_level: str = "INFO"
+
+    @field_validator(
+        "knowledge_base_path", "knowledge_base_dir", "knowledge_embedding_cache_path",
+        "knowledge_milvus_uri", "knowledge_index_catalog_path", "code_conversion_storage_dir",
+        "aider_source_root", "workspace_root", "job_workspace_root",
+        mode="after",
+    )
+    @classmethod
+    def resolve_project_path(cls, value: Path) -> Path:
+        return value if value.is_absolute() else (PROJECT_ROOT / value).resolve()
 
     @classmethod
     def from_env(cls, env_file: Path = PROJECT_ROOT / ".env") -> "Settings":
@@ -80,6 +119,20 @@ class Settings(BaseModel):
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def knowledge_model(self) -> str:
+        return self.knowledge_qwen_model if self.knowledge_provider == "qwen" else self.glm_model
+
+    @property
+    def retrieval_api_base_url(self) -> str:
+        if self.dashscope_http_base_url:
+            return self.dashscope_http_base_url.rstrip("/")
+        base = self.dashscope_base_url.rstrip("/")
+        suffix = "/compatible-mode/v1"
+        if not base.endswith(suffix):
+            raise ValueError("Set DASHSCOPE_HTTP_BASE_URL for a custom embedding/rerank endpoint")
+        return base[:-len(suffix)] + "/api/v1"
 
     @property
     def workspace_names(self) -> set[str]:

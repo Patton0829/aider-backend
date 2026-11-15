@@ -5,12 +5,24 @@ description = "FastAPI backend for the control-center aider agent and live job l
 requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.115,<1.0",
+  "httpx>=0.28,<1.0",
   "openai>=1.68,<3.0",
   "pexpect>=4.9,<5.0",
   "uvicorn[standard]>=0.34,<1.0",
 ]
 
 [project.optional-dependencies]
+milvus = [
+  "pymilvus[milvus-lite]==3.0.2",
+  "milvus-lite==3.2.2",
+]
 dev = [
   "httpx>=0.28,<1.0",
 ]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
