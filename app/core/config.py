@@ -52,6 +52,18 @@ class Settings(BaseModel):
     knowledge_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     knowledge_top_k: int = Field(default=5, ge=1, le=20)
     knowledge_history_turns: int = Field(default=6, ge=0, le=20)
+    # Application budgets, not claims about any provider's maximum window.
+    knowledge_context_window_tokens: int = Field(default=65536, ge=2048)
+    knowledge_max_input_tokens: int = Field(default=49152, ge=1024)
+    knowledge_context_safety_tokens: int = Field(default=2048, ge=128)
+    knowledge_evidence_budget_tokens: int = Field(default=24000, ge=256)
+    knowledge_memory_enabled: bool = True
+    knowledge_memory_history_tokens: int = Field(default=12000, ge=256)
+    knowledge_memory_summary_tokens: int = Field(default=2048, ge=128)
+    knowledge_memory_summary_timeout_seconds: float = Field(default=4.0, gt=0, le=30)
+    knowledge_memory_recall_tokens: int = Field(default=8000, ge=1024)
+    knowledge_memory_recall_limit: int = Field(default=6, ge=1, le=20)
+    knowledge_memory_scan_limit: int = Field(default=200, ge=20, le=1000)
     knowledge_rewrite_followups: bool = True
     knowledge_evidence_check: Literal["model", "off"] = "model"
     knowledge_control_timeout_seconds: float = Field(default=12.0, gt=0)
@@ -100,6 +112,13 @@ class Settings(BaseModel):
             database=self.db_database.strip(), username=self.db_username.strip(),
             password=self.db_password,
         ).render_as_string(hide_password=False)
+        return self
+
+    @model_validator(mode="after")
+    def validate_context_budget(self):
+        output = self.knowledge_qwen_max_tokens if self.knowledge_provider == "qwen" else self.glm_max_tokens
+        if self.knowledge_context_window_tokens - output - self.knowledge_context_safety_tokens < 512:
+            raise ValueError("Context window must reserve space for output, safety margin and at least 512 input tokens")
         return self
 
     @field_validator("knowledge_database_url")

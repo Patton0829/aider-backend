@@ -550,6 +550,77 @@ MySQL 数据应与原始知识库、索引 catalog 一同纳入现有备份流�
 
 实现依据：[SQLAlchemy 异步连接文档](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)。
 
+## 第五阶段：上下文预算与会话记忆
+
+完整问答仍保存在 `rag_turns`；近期原文和旧内容摘要保存在现有
+`rag_conversations.state` JSON 中。无需新增表、无需重新建库或重建知识库向量。
+本阶段不修改前端，已有“已保存”、恢复、清空和删除功能继续适用。
+
+每次问答链路中的模型调用（包括改写、证据审核和摘要选择）都会检查输入预算。
+输入上限为 `min(MAX_INPUT, CONTEXT_WINDOW - 预留输出 - 安全余量)`。
+当前使用 **UTF-8 字节数 + 消息开销的保守 token 估算**，不是千问 tokenizer 的精确计数；
+无需额外下载模型或 tokenizer。下列 64K/48K 是应用侧预算，不代表实际模型的最大上下文窗口，
+接入较小窗口的模型时必须相应降低配置。
+
+```dotenv
+KNOWLEDGE_CONTEXT_WINDOW_TOKENS=65536
+KNOWLEDGE_MAX_INPUT_TOKENS=49152
+KNOWLEDGE_CONTEXT_SAFETY_TOKENS=2048
+KNOWLEDGE_EVIDENCE_BUDGET_TOKENS=24000
+KNOWLEDGE_HISTORY_TURNS=6
+KNOWLEDGE_MEMORY_ENABLED=true
+KNOWLEDGE_MEMORY_HISTORY_TOKENS=12000
+KNOWLEDGE_MEMORY_SUMMARY_TOKENS=2048
+KNOWLEDGE_MEMORY_SUMMARY_TIMEOUT_SECONDS=4
+KNOWLEDGE_MEMORY_RECALL_TOKENS=8000
+KNOWLEDGE_MEMORY_RECALL_LIMIT=6
+KNOWLEDGE_MEMORY_SCAN_LIMIT=200
+```
+
+近期原文同时受轮数和估算 token 预算约束，原文预算还限制在有效输入预算的三分之一以内。
+达到阈值后才调用一次摘要选择，普通短对话不增加摘要请求；压缩时将近期轮数降至上限约一半，
+留出后续轮次空间，减少达到上限后每轮都做摘要的情况。摘要选择默认最多等待 4 秒。
+摘要是**有来源的结构化摘录**：
+保留 user/assistant 身份和原消息 SHA-256，模型只选择候选下标，不能生成或改写事实。
+输入给模型时明确区分用户曾说过的话和模型先前建议，历史内容不是本轮故障诊断证据。
+摘要超时、输出非法或候选编号不存在时，退回有界的原文摘录，不影响本轮回答保存。
+摘要与答案、上下文通过原有事务一起提交；失败或中断的回答不更新完成态记忆。
+诊断话题切换仍会重置工作上下文；原始旧记录可在回顾请求中按需读取。
+
+“我第一条问题是什么”“第十二条问题是什么”等回顾问题，会在**当前归属凭据和当前会话**内
+按原始 sequence 精确读取已完成记录，不受近期窗口和主题扫描条数限制。
+失败轮次不作为记忆，序号存在空缺时不会把其他轮次冒充成指定轮次。
+“我问过哪些问题”返回有限条原始记录并标记还有更多；
+“回顾之前关于轴承温度的对话”对最近最多 200 条已完成记录进行词汇相关性匹配。
+这是有界的 MySQL 历史检索，尚未建立历史问答的向量索引，不提供跨用户、跨会话的记忆查询。
+返回给模型的旧回答只是带截断标记的摘录，原文仍在 MySQL 中。
+
+证据预算按完整片段选择，保留可核验的原文与引用编号，不截断半条证据来凑长度。
+最后一次消息装配还会移除较早的可选历史，并保留系统规则、完整当前问题及回顾请求的原始记录。
+必须保留的输入仍放不下时，返回 `ContextBudgetExceeded`，不会静默截断问题。
+上游明确报告上下文超限时，仅在尚未开始流式输出、能够进一步缩减历史时重试一次；
+已经输出部分回答后不会重发生成请求。模型实际窗口仍应与本地配置一致。
+
+`metrics` 新增估算输入量、输入预算、裁剪消息数、上下文重试、摘要方法/条数、
+旧历史读取方式/条数和记忆处理耗时。`manage check` 与 `/api/knowledge/info` 同时提供记忆配置。
+只有调用模型选择摘录的轮次标记 `model_selection`；退回原文摘录时标记 `extractive_fallback`。
+
+代码拉取后仍需按现有部署流程重启后端才生效。部署后的验收可运行：
+
+```bash
+cd /root/system/aider-backend
+.venv/bin/python -m app.manage check
+.venv/bin/python -m app.manage memory-smoke
+```
+
+`memory-smoke` 会创建独立临时会话，发送超过近期轮数的短问题，检查摘要生成、重新连接恢复、
+第一条原始问题读取、输入预算与完整记录保留，最后删除自己创建的临时会话。
+默认近期轮数为 6 时，共生成 8 轮回答并可能产生摘要选择调用，会消耗少量 API 额度。
+可手动验证：连续追问超过 6 轮后询问“我第一条问题是什么”，再刷新恢复并继续诊断追问。
+
+设计参考：[LangGraph 记忆管理](https://docs.langchain.com/oss/python/langgraph/add-memory)、
+[百炼输入长度错误说明](https://help.aliyun.com/en/model-studio/error-code)。
+
 ## 算法代码语言转换
 
 中心云后端以 `application/zip` 原始请求体提交算法包，Aider 在后台安全解压并

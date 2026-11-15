@@ -8,12 +8,13 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     JSON, Column, DateTime, ForeignKey, Index, Integer, MetaData, String, Table,
-    Text, UniqueConstraint, delete, insert, select, update,
+    Text, UniqueConstraint, delete, func, insert, select, update,
 )
 from sqlalchemy.dialects.mysql import DATETIME, MEDIUMTEXT, VARCHAR
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import Settings
+from app.services.conversation_memory import recall_plan, relevance
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -190,6 +191,40 @@ class ConversationStore:
         return {"conversation": self.summary(conversation), "state": conversation["state"],
                 "turns": [self.turn_record(row) for row in selected], "hasMore": len(rows) > limit,
                 "nextBefore": selected[0]["sequence"] if len(rows) > limit and selected else None}
+
+    async def recall(self, owner, identity, question):
+        """Read completed episodes from this owned conversation only, never other users.
+
+        Ordered/ordinal reads work beyond the scan window. Subject matching is a
+        deliberately bounded lexical scan, not an all-history semantic index.
+        """
+        mode, ordinal = recall_plan(question)
+        limit = self.settings.knowledge_memory_recall_limit
+        async with self.operation() as connection:
+            await self._locked(connection, owner, identity)
+            condition = (turns.c.conversation_id == identity) & (turns.c.status == "completed")
+            total = await connection.scalar(select(func.count()).select_from(turns).where(condition))
+            query = select(turns.c.sequence, turns.c.question,
+                           func.substr(turns.c.answer, 1, 1200).label("answer")).where(condition)
+            if mode == "ordinal":
+                if not ordinal or not 1 <= ordinal <= 2147483647:
+                    rows = []
+                else:
+                    rows = (await connection.execute(query.where(turns.c.sequence == ordinal).limit(1))).mappings().all()
+            elif mode == "list":
+                rows = (await connection.execute(query.order_by(turns.c.sequence).limit(limit))).mappings().all()
+            else:
+                scan = self.settings.knowledge_memory_scan_limit if mode == "search" else limit
+                rows = (await connection.execute(query.order_by(turns.c.sequence.desc()).limit(scan))).mappings().all()
+                if mode == "search":
+                    ranked = [(relevance(question, row["question"] + row["answer"]), row) for row in rows]
+                    rows = [row for score, row in sorted(ranked, key=lambda item: item[0], reverse=True) if score > 0][:limit]
+                rows = sorted(rows, key=lambda row: row["sequence"])
+        records = [{"sequence": row["sequence"], "question": row["question"],
+                    "answerExcerpt": row["answer"], "answerMayBeTruncated": len(row["answer"]) == 1200} for row in rows]
+        return {"mode": mode, "requestedOrdinal": ordinal, "completedCount": total,
+                "records": records, "hasMore": total > len(records),
+                "scannedLimit": self.settings.knowledge_memory_scan_limit if mode == "search" else None}
 
     async def begin(self, owner, identity, request_id, question):
         if not request_id or request_id != request_id.strip():

@@ -1,10 +1,12 @@
 """Per-socket state with explicit persistence, idempotent replay and completed checkpoints."""
 import asyncio
 import logging
+import time
 from contextlib import aclosing
 
 from app.schemas.knowledge import KnowledgeSource
 from app.services.conversation_store import HistoryConflict, HistoryError, TurnHeartbeat, empty_state, owner_hash
+from app.services.knowledge import is_conversation_recall
 
 
 class ConversationSession:
@@ -68,6 +70,12 @@ class ConversationSession:
         committed = False
         try:
             yield {"type": "session", "data": lease["conversation"]}
+            if self.store.settings.knowledge_memory_enabled and is_conversation_recall(request.question):
+                # Transient retrieval data is not written back into the checkpoint.
+                started = time.perf_counter()
+                records = await self.store.recall(owner, identity, request.question)
+                self.state = {**self.state, "recall_records": records,
+                              "recall_ms": round((time.perf_counter() - started) * 1000, 2)}
             async with aclosing(workflow.stream(request.question.strip(), self.state)) as events:
                 checkpoint = None
                 async for event in events:

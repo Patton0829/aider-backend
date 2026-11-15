@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "turnCount": 8,
+  "summaryMethods": [
+    "model_selection"
+  ],
+  "checks": {
+    "allTurnsSaved": true,
+    "summaryCreated": true,
+    "restoredAfterReconnect": true,
+    "oldQuestionRecalled": true,
+    "ownedDatabaseRecall": true,
+    "inputWithinBudget": true,
+    "completeRecordsPreserved": true
+  },
+  "environment": "local Qwen API + isolated MySQL test schema",
+  "recentTurns": 6,
+  "model": "qwen3.8-flash",
+  "serverDeployed": false,
+  "checkedAt": "2026-11-15T14:48:04.697226+00:00"
+}

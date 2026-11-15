@@ -10,6 +10,8 @@ from langgraph.graph import END, START, StateGraph
 
 from app.core.config import Settings
 from app.services.citation_guard import CitationGuard
+from app.services.conversation_memory import ConversationMemory
+from app.services.context_budget import ContextBudget, ContextBudgetExceeded, text_tokens
 from app.services.knowledge import (
     ENTRY_ID_RE, KnowledgeSearchResult, KnowledgeService,
     is_contextual_follow_up, is_conversation_recall, should_retrieve_knowledge,
@@ -27,6 +29,11 @@ class QuestionState(TypedDict, total=False):
     last_mode: str | None
     follow_up: bool
     conversation_recall: bool
+    summary: list[dict]
+    recall_records: dict
+    recall_ms: float
+    memory_metrics: dict
+    context_metrics: dict
     mode: str
     query: str
     rewrite: str
@@ -54,6 +61,7 @@ def timed(state: QuestionState, name: str, started: float) -> dict:
 class KnowledgeWorkflow:
     def __init__(self, settings: Settings, knowledge: KnowledgeService, llm, retriever=None):
         self.settings, self.knowledge, self.llm, self.retriever = settings, knowledge, llm, retriever
+        self.memory = ConversationMemory(settings, llm)
         graph = StateGraph(QuestionState)
         for name in ("conversation", "retrieve", "assess", "generate", "clarify", "validate", "finish"):
             graph.add_node(name, getattr(self, name))
@@ -79,9 +87,11 @@ class KnowledgeWorkflow:
     async def conversation(self, state: QuestionState):
         started = time.perf_counter()
         question, history = state["question"], state.get("history", [])
+        history, summary, memory_metrics = await self.memory.compact(history, state.get("summary", []))
+        memory_metrics["memoryMs"] = (time.perf_counter() - started) * 1000
         topic = state.get("topic", "")
         recall = is_conversation_recall(question)
-        follow_up = bool(history) and (recall or is_contextual_follow_up(question))
+        follow_up = bool(history or summary) and (recall or is_contextual_follow_up(question))
         # Explicitly naming a different equipment family starts a fresh topic.
         previous_equipment = {n for n, terms in enumerate(EQUIPMENT) if any(term in topic for term in terms)}
         current_equipment = {n for n, terms in enumerate(EQUIPMENT) if any(term in question for term in terms)}
@@ -96,7 +106,7 @@ class KnowledgeWorkflow:
         else:
             mode = "knowledge" if should_retrieve_knowledge(question) else "direct"
         if not follow_up and not recall:
-            history, topic = [], question
+            history, summary, topic = [], [], question
         query, method = question, "standalone"
         emit("route", mode)
         if follow_up and mode == "knowledge":
@@ -106,12 +116,13 @@ class KnowledgeWorkflow:
             if self.settings.knowledge_rewrite_followups:
                 emit("status", "正在补全追问中的设备和故障上下文")
                 try:
-                    rewritten = await self.llm.rewrite_question(question, topic, history)
+                    rewritten = await self.llm.rewrite_question(question, topic, self.memory.assemble(history, summary))
                     query = f"{topic}\n{rewritten}\n{question}"
                     method = "model"
                 except Exception as error:
                     logger.warning("RAG follow-up rewrite fallback (%s)", type(error).__name__)
-        return {"history": history, "topic": topic, "follow_up": follow_up, "conversation_recall": recall, "mode": mode,
+        return {"history": history, "summary": summary, "memory_metrics": memory_metrics,
+                "topic": topic, "follow_up": follow_up, "conversation_recall": recall, "mode": mode,
                 "query": query, "rewrite": method, "timings": timed(state, "conversationMs", started)}
 
     async def retrieve(self, state: QuestionState):
@@ -123,6 +134,14 @@ class KnowledgeWorkflow:
             results, trace = outcome.results, outcome.metrics
         else:
             results = await self.retriever.search(state["query"]) if self.retriever else self.knowledge.search(state["query"])
+        output_tokens = self.settings.knowledge_qwen_max_tokens if self.settings.knowledge_provider == "qwen" else self.settings.glm_max_tokens
+        evidence_budget = min(self.settings.knowledge_evidence_budget_tokens, ContextBudget(self.settings, output_tokens).limit // 2)
+        selected = []
+        for result in results:
+            if text_tokens(self.knowledge.format_context([*selected, result])) <= evidence_budget:
+                selected.append(result)
+        trace["evidenceBudgetDropped"] = len(results) - len(selected)
+        results = selected
         emit("sources", sources=[result.source_dict() for result in results])
         return {"results": results, "retrieval_trace": trace, "timings": timed(state, "retrievalMs", started)}
 
@@ -132,7 +151,10 @@ class KnowledgeWorkflow:
         answerable, numbers, missing, reason = False, [], [], "no_results"
         requested = {s.upper() for s in ENTRY_ID_RE.findall(state["question"])}
         available = {r.chunk.entry_id.upper() for r in results if r.chunk.entry_id}
-        if requested - available:
+        if not results and state.get("retrieval_trace", {}).get("evidenceBudgetDropped"):
+            reason = "evidence_budget_exhausted"
+            missing = ["候选片段超过上下文证据预算，请缩小问题范围或调整证据预算。"]
+        elif requested - available:
             reason = "requested_entry_missing"
             missing = ["本轮检索未找到问题指定的全部条目，请核对条目编号或补充资料。"]
         elif results:
@@ -151,6 +173,9 @@ class KnowledgeWorkflow:
                     numbers = sorted(set(assessment.evidence_numbers)) if answerable else []
                     missing = assessment.missing_information
                     reason = ("model_partial" if assessment.coverage == "partial" else "model_sufficient") if answerable else "model_insufficient"
+                except ContextBudgetExceeded:
+                    reason = "evidence_budget_exhausted"
+                    missing = ["问题与证据合计超过审核上下文预算，请缩小问题范围或减少检索片段。"]
                 except Exception as error:
                     reason = "check_unavailable"
                     logger.warning("RAG evidence check unavailable (%s)", type(error).__name__)
@@ -161,6 +186,8 @@ class KnowledgeWorkflow:
     async def clarify(self, state: QuestionState):
         if state["assessment_reason"] == "check_unavailable":
             answer = "本次证据检查暂未完成，无法确认资料是否足以支持回答，请稍后重试。"
+        elif state["assessment_reason"] == "evidence_budget_exhausted":
+            answer = "本轮检索资料超过上下文预算，尚不能完成证据审核。" + "；".join(state["missing"])
         else:
             answer = "当前知识库中没有足够信息支持回答。"
             answer += ("还需要：" + "；".join(state["missing"]) if state["missing"] else "请补充设备类型、故障现象、动作阶段和监测数据。")
@@ -183,9 +210,10 @@ class KnowledgeWorkflow:
             question = state["question"]
             if state["follow_up"]:
                 question = f"已知话题：{state['topic']}\n本轮追问：{question}\n请只回答本轮追问。"
-            stream = self.llm.stream_answer(question, context, state["history"])
+            stream = self.llm.stream_answer(question, context, self.memory.assemble(state["history"], state["summary"]))
         else:
-            stream = self.llm.stream_direct_answer(state["question"], state["history"])
+            stream = self.llm.stream_direct_answer(state["question"], self.memory.assemble(
+                state["history"], state["summary"], state.get("recall_records")))
         answer, first = "", None
         async with aclosing(stream):
             async for delta in stream:
@@ -202,6 +230,7 @@ class KnowledgeWorkflow:
         if not answer.strip():
             raise RuntimeError("Empty model answer")
         return {"answer": answer, "first_content_ms": first,
+                "context_metrics": self.llm.context_metrics() if hasattr(self.llm, "context_metrics") else {},
                 "validation": guard.report() if guard else {"passed": True, "scope": "not_applicable"},
                 "timings": timed(state, "generationMs", started)}
 
@@ -225,9 +254,18 @@ class KnowledgeWorkflow:
 
     async def finish(self, state: QuestionState):
         history = state["history"] + [{"role": "user", "content": state["question"]}, {"role": "assistant", "content": state["answer"]}]
-        limit = self.settings.knowledge_history_turns * 2
-        history = history[-limit:] if limit else []
-        metrics = {**state["timings"], **state.get("retrieval_trace", {}), "firstContentMs": state.get("first_content_ms"),
+        memory_started = time.perf_counter()
+        history, summary, memory_metrics = await self.memory.compact(history, state["summary"])
+        metrics = {**state["timings"], **state.get("retrieval_trace", {}), **state.get("context_metrics", {}),
+                   **state.get("memory_metrics", {}), **memory_metrics,
+                   "memorySummaryUpdated": memory_metrics["memorySummaryUpdated"] or state["memory_metrics"]["memorySummaryUpdated"],
+                   "memorySummaryMethod": (memory_metrics["memorySummaryMethod"] if memory_metrics["memorySummaryUpdated"]
+                                           else state["memory_metrics"]["memorySummaryMethod"]),
+                   "memoryMs": round(state["memory_metrics"]["memoryMs"] + (time.perf_counter() - memory_started) * 1000, 2),
+                   "memoryRecallMode": state.get("recall_records", {}).get("mode", "none"),
+                   "memoryRecallCount": len(state.get("recall_records", {}).get("records", [])),
+                   "memoryRecallMs": state.get("recall_ms", 0),
+                   "firstContentMs": state.get("first_content_ms"),
                    "totalMs": round((time.perf_counter() - state["started"]) * 1000, 2),
                    "followUp": state["follow_up"], "conversationRecall": state["conversation_recall"], "rewrite": state["rewrite"],
                    "answerMode": state["mode"], "assessment": state.get("assessment_reason", "not_applicable"),
@@ -237,5 +275,5 @@ class KnowledgeWorkflow:
         logger.info("RAG workflow timings: %s", metrics)
         # Recalling the conversation must not replace the diagnostic topic/route.
         last_mode = state.get("last_mode") if state["conversation_recall"] else state["mode"]
-        emit("_complete", data={"history": history, "topic": state["topic"], "last_mode": last_mode})
+        emit("_complete", data={"history": history, "summary": summary, "topic": state["topic"], "last_mode": last_mode})
         return {}

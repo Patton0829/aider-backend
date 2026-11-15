@@ -30,7 +30,7 @@ async def smoke(settings: Settings, api_base: str, question: str) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["check", "indexes", "rebuild", "activate", "smoke", "evaluate", "cache-check", "cache-smoke", "db-init", "history-check", "history-smoke"])
+    parser.add_argument("command", choices=["check", "indexes", "rebuild", "activate", "smoke", "evaluate", "cache-check", "cache-smoke", "db-init", "history-check", "history-smoke", "memory-smoke"])
     parser.add_argument("version", nargs="?")
     parser.add_argument("--api-base", default="http://127.0.0.1:8000")
     parser.add_argument("--question", default="转辙机锁闭不到位，可能有哪些原因？应按什么顺序检查？")
@@ -41,6 +41,13 @@ def main():
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
     settings = Settings.from_env()
+    if args.command == "memory-smoke":
+        from app.memory_check import memory_smoke
+        try:
+            return asyncio.run(memory_smoke(settings, args.api_base))
+        except Exception as error:
+            print(f"Memory smoke test failed ({type(error).__name__}); inspect backend/database status.", file=sys.stderr)
+            return 1
     if args.command == "db-init":
         from app.services.conversation_store import ConversationStore
         async def initialize():
@@ -109,6 +116,11 @@ def main():
             "queryCacheEnabled": settings.knowledge_cache_enabled,
             "queryCacheTtlSeconds": settings.knowledge_cache_ttl_seconds,
             "historyStore": settings.knowledge_history_store,
+            "memoryEnabled": settings.knowledge_memory_enabled,
+            "memoryRecentTurns": settings.knowledge_history_turns,
+            "contextWindowTokens": settings.knowledge_context_window_tokens,
+            "maxInputTokens": settings.knowledge_max_input_tokens,
+            "tokenEstimator": "utf8_bytes_v1",
             "knowledgeDirectory": str(settings.knowledge_base_dir),
             "milvusPath": str(settings.knowledge_milvus_uri),
             "catalogPath": str(settings.knowledge_index_catalog_path),

@@ -10,6 +10,12 @@ from app.core.config import PROJECT_ROOT, Settings
 
 
 class SettingsTest(unittest.TestCase):
+    def test_context_window_requires_output_and_safety_reserve(self):
+        with self.assertRaises(ValidationError):
+            Settings(knowledge_provider="qwen", knowledge_context_window_tokens=2048)
+        with self.assertRaises(ValidationError):
+            Settings(knowledge_context_safety_tokens=65536)
+
     def test_database_parts_encode_password_and_hide_secrets(self):
         password = 'p@ss:/?#% +密码"end'
         settings = Settings(db_host="db.example.com", db_username="rag_user",

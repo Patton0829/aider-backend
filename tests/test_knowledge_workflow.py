@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from contextlib import aclosing
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -176,8 +177,19 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
             session = self.data(events, "_complete")
         self.assertIn("锁闭不到位", self.retriever.queries[-1])
         self.assertEqual(session["topic"], "转辙机锁闭不到位如何排查？")
-        self.assertEqual(len(session["history"]), 12)
+        self.assertLessEqual(len(session["history"]), 12)
+        self.assertTrue(session["summary"])
         self.assertEqual(self.data(events, "metrics")["rewrite"], "model")
+
+    async def test_followup_retains_topic_when_only_summary_fits(self):
+        self.settings.knowledge_memory_history_tokens = 256
+        initial = self.data(await self.run_question("转辙机锁闭故障，" + "现场现象较长。" * 100), "_complete")
+        self.assertEqual(initial["history"], [])
+        self.assertTrue(initial["summary"])
+        events = await self.run_question("那电流呢？", initial)
+        self.assertTrue(self.data(events, "metrics")["followUp"])
+        self.assertEqual(self.data(events, "metrics")["answerMode"], "knowledge")
+        self.assertIn("转辙机锁闭故障", self.retriever.queries[-1])
 
     async def test_rewrite_failure_falls_back_to_anchor_without_leaking_error(self):
         initial = self.data(await self.run_question(), "_complete")
@@ -310,6 +322,27 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         generation = next(c for c in self.llm.calls if c[0] == "generate")
         self.assertNotIn("[资料1]", generation[2])
         self.assertTrue(self.data(events, "validation")["passed"])
+
+    async def test_evidence_budget_skips_whole_oversized_chunks_without_damaging_citations(self):
+        first = result()
+        huge = replace(result("SW-022", 2), chunk=replace(result("SW-022", 2).chunk, content="过长资料" * 2000))
+        self.settings.knowledge_evidence_budget_tokens = 1024
+        self.retriever.results = [first, huge]
+        events = await self.run_question()
+        sources = next(e["sources"] for e in events if e["type"] == "sources")
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["entry_id"], "SW-021")
+        self.assertEqual(self.data(events, "metrics")["evidenceBudgetDropped"], 1)
+        self.assertTrue(self.data(events, "validation")["passed"])
+
+    async def test_all_evidence_over_budget_is_distinct_from_missing_knowledge(self):
+        item = result()
+        self.retriever.results = [replace(item, chunk=replace(item.chunk, content="资料" * 2000))]
+        self.settings.knowledge_evidence_budget_tokens = 256
+        events = await self.run_question()
+        self.assertEqual(self.data(events, "assessment")["reason"], "evidence_budget_exhausted")
+        self.assertIn("上下文预算", "".join(e["content"] for e in events if e["type"] == "delta"))
+        self.assertFalse(self.llm.calls)
 
     async def test_error_does_not_mutate_callers_session(self):
         session = {"history": [], "topic": "", "last_mode": None}

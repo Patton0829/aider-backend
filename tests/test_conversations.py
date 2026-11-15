@@ -87,11 +87,57 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(events[-1]["data"]["persisted"])
         self.assertEqual(llm.calls[-1][0], "direct")
         history = llm.calls[-1][-1]
-        self.assertEqual([m["content"] for m in history if m["role"] == "user"], questions[:2])
+        self.assertEqual([m["content"] for m in history if m["role"] == "user" and not m.get("_context_required")], questions[:2])
+        self.assertIn('"completedCount": 2', history[-1]["content"])
         restored = await self.store.restore(self.owner, self.identity)
         self.assertEqual(len(restored["turns"]), 3)
         self.assertEqual(restored["state"]["topic"], questions[0])
         self.assertEqual(restored["state"]["last_mode"], "knowledge")
+
+    async def test_recall_reads_old_records_beyond_short_term_window_and_failed_gaps(self):
+        await self.complete(await self.begin("old-first", "轴承温度报警"), "先前建议检查温度传感器")
+        failed = await self.begin("failed", "失败的问题不应成为记忆")
+        await self.store.fail(self.owner, self.identity, failed["lease"], {})
+        for number in range(10):
+            await self.complete(await self.begin(f"later-{number}", f"转辙机第{number}个观测"))
+        first = await self.store.recall(self.owner, self.identity, "我第一条问题是什么？")
+        self.assertEqual(first["records"][0]["question"], "轴承温度报警")
+        self.assertFalse((await self.store.recall(self.owner, self.identity, "第二条问题是什么？"))["records"])
+        third = await self.store.recall(self.owner, self.identity, "第三条问题是什么？")
+        self.assertEqual(third["records"][0]["sequence"], 3)
+        self.assertFalse((await self.store.recall(self.owner, self.identity, "第999999999999999999999条问题是什么？"))["records"])
+        records = await self.store.recall(self.owner, self.identity, "回顾之前关于轴承温度的对话")
+        self.assertEqual(records["records"][0]["sequence"], 1)
+        listed = await self.store.recall(self.owner, self.identity, "我问过哪些问题")
+        self.assertEqual(len(listed["records"]), 6)
+        self.assertTrue(listed["hasMore"])
+        self.assertNotIn("失败的问题", str(listed))
+
+    async def test_recall_enforces_owner_and_conversation_isolation(self):
+        await self.complete(await self.begin())
+        other_owner = owner_hash(uuid.uuid4().hex)
+        self.owners.add(other_owner)
+        other = await self.store.create(other_owner)
+        with self.assertRaises(HistoryNotFound):
+            await self.store.recall(other_owner, self.identity, "第一条问题是什么")
+        with self.assertRaises(HistoryNotFound):
+            await self.store.recall(self.owner, other["id"], "第一条问题是什么")
+
+    async def test_summary_checkpoint_survives_restart_and_clear_removes_memory(self):
+        self.settings.knowledge_history_turns = 1
+        workflow = KnowledgeWorkflow(self.settings, KnowledgeService(Path(self.temp.name) / "unused.md"), FakeLlm(), FakeRetriever())
+        for number, question in enumerate(("转辙机锁闭故障", "那电流呢？", "那下一步呢？")):
+            request = KnowledgeRequest(question=question, requestId=f"summary-{number}",
+                                       conversationId=self.identity, ownerToken=self.token)
+            _ = [event async for event in ConversationSession(self.store).stream(workflow, request)]
+        restarted = ConversationStore(self.settings, self.engine, clock=lambda: self.now)
+        saved = await restarted.restore(self.owner, self.identity)
+        self.assertTrue(saved["state"]["summary"])
+        self.assertEqual(len(saved["state"]["history"]), 2)
+        self.assertEqual(len(saved["turns"]), 3)
+        self.assertNotIn("recall_records", saved["state"])
+        await restarted.clear(self.owner, self.identity)
+        self.assertEqual((await restarted.restore(self.owner, self.identity))["state"], empty_state())
 
     async def test_owner_isolation_for_read_list_clear_delete_and_begin(self):
         other = owner_hash(uuid.uuid4().hex)
@@ -275,7 +321,7 @@ class HistoryApiTests(unittest.TestCase):
                             self.assertEqual(metrics["answerMode"], "direct")
                             self.assertTrue(metrics["conversationRecall"])
                             history = app.state.knowledge_llm_service.calls[-1][-1]
-                            self.assertEqual([m["content"] for m in history if m["role"] == "user"], ["转辙机锁闭故障", "那电流呢？"])
+                            self.assertEqual([m["content"] for m in history if m["role"] == "user" and not m.get("_context_required")], ["转辙机锁闭故障", "那电流呢？"])
                             self.assertTrue(next(e["data"] for e in events if e["type"] == "done")["persisted"])
                 saved = client.get(f"/api/knowledge/conversations/{identity}", headers=headers).json()
                 self.assertEqual(len(saved["turns"]), 3)

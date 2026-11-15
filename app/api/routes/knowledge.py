@@ -9,6 +9,7 @@ from app.core.security import authorize_http, authorize_websocket
 from app.schemas.knowledge import KnowledgeEvent, KnowledgeRequest, KnowledgeSource
 from app.services.knowledge_workflow import KnowledgeWorkflow
 from app.services.conversation_session import ConversationSession
+from app.services.context_budget import ContextBudgetExceeded
 from app.services.conversation_store import HistoryError
 from app.services.knowledge import (
     KnowledgeDocumentConflictError,
@@ -30,11 +31,18 @@ def knowledge_payload(request: Request) -> dict:
         "workflow": "langgraph_single",
         "evidenceCheck": settings.knowledge_evidence_check,
         "conversationPersistence": "connection",
+        "memory": {"enabled": settings.knowledge_memory_enabled,
+                   "recentTurns": settings.knowledge_history_turns,
+                   "contextWindowTokens": settings.knowledge_context_window_tokens,
+                   "maxInputTokens": settings.knowledge_max_input_tokens,
+                   "tokenEstimator": "utf8_bytes_v1",
+                   "historyRecall": "connection_only"},
     }
     history_store = getattr(request.app.state, "conversation_store", None)
     if history_store is not None:
         payload["conversationPersistence"] = "mysql"
         payload["historyStore"] = history_store.info()
+        payload["memory"]["historyRecall"] = "owned_mysql_lexical"
     retriever = getattr(request.app.state, "knowledge_retriever", None)
     if retriever is not None:
         payload.update(retriever.info())
@@ -272,6 +280,10 @@ async def knowledge_socket(websocket: WebSocket):
             except HistoryError as error:
                 await send_event(websocket, "error", str(error), request_id=request_id,
                                  data={"code": type(error).__name__}, conversation_id=session.identity)
+                await send_event(websocket, "ready", request_id=request_id)
+            except ContextBudgetExceeded as error:
+                await send_event(websocket, "error", str(error), request_id=request_id,
+                                 data={"code": "ContextBudgetExceeded"}, conversation_id=session.identity)
                 await send_event(websocket, "ready", request_id=request_id)
             except Exception as error:
                 logging.getLogger("uvicorn.error").warning("RAG request failed (%s)", type(error).__name__)
