@@ -51,6 +51,9 @@ class Settings(BaseModel):
     knowledge_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     knowledge_top_k: int = Field(default=5, ge=1, le=20)
     knowledge_history_turns: int = Field(default=6, ge=0, le=20)
+    knowledge_rewrite_followups: bool = True
+    knowledge_evidence_check: Literal["model", "off"] = "model"
+    knowledge_control_timeout_seconds: float = Field(default=12.0, gt=0)
     knowledge_retrieval_mode: Literal["keyword", "vector", "hybrid"] = "keyword"
     knowledge_candidate_k: int = Field(default=20, ge=1, le=500)
     knowledge_bm25_recall_k: int = Field(default=20, ge=1, le=500)

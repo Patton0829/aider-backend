@@ -12,11 +12,12 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 
-ENTRY_ID_RE = re.compile(r"\b[A-Z]{2,8}-\d{3}\b", re.IGNORECASE)
+ENTRY_ID_RE = re.compile(r"(?<![A-Z0-9_-])[A-Z]{2,8}-\d{3}(?![A-Z0-9_-])", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z][a-z0-9_-]*|\d+(?:\.\d+)?|[\u4e00-\u9fff]+", re.IGNORECASE)
 TABLE_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
 SUPPORTED_KNOWLEDGE_EXTENSIONS = {".md", ".markdown", ".txt"}
 KNOWLEDGE_INTENT_TERMS = (
+    "锁闭", "密贴", "堵转", "齿轮", "电流曲线", "润滑", "机械磨损", "牵引", "制动", "车门",
     "故障",
     "异常",
     "报警",
@@ -40,6 +41,7 @@ KNOWLEDGE_INTENT_TERMS = (
     "轮对",
 )
 CONTEXTUAL_FOLLOW_UP_PREFIXES = (
+    "如果", "若", "那", "那么", "是否就能", "为什么", "怎么判断", "还有", "能否排除",
     "这个",
     "这种",
     "该故障",
@@ -455,6 +457,7 @@ class KnowledgeService:
             blocks.append(
                 f"[资料{index}] 文档：{result.chunk.document}；"
                 f"来源：{result.chunk.source_label}；"
+                f"片段ID：{result.chunk.chunk_id}；版本：{result.kb_version or '未发布'}；"
                 f"原文行：{result.chunk.line_start}-{result.chunk.line_end}\n"
                 f"{result.chunk.content}"
             )

@@ -40,9 +40,13 @@ class KnowledgeEvent(BaseModel):
         "cleared",
         "error",
         "closed",
+        "assessment",
+        "validation",
+        "metrics",
     ]
     content: str = ""
     sources: list[KnowledgeSource] = Field(default_factory=list)
+    data: dict | None = None
     request_id: str | None = Field(
         default=None,
         serialization_alias="requestId",

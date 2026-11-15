@@ -1,18 +1,18 @@
+from contextlib import aclosing
+import logging
+
 from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.core.config import get_settings
 from app.core.security import authorize_http, authorize_websocket
 from app.schemas.knowledge import KnowledgeEvent, KnowledgeRequest, KnowledgeSource
-from app.services.knowledge_llm import KnowledgeLlmService
+from app.services.knowledge_workflow import KnowledgeWorkflow
 from app.services.knowledge import (
     KnowledgeDocumentConflictError,
     KnowledgeDocumentNotFoundError,
-    KnowledgeSearchResult,
     KnowledgeService,
     KnowledgeValidationError,
-    is_contextual_follow_up,
-    should_retrieve_knowledge,
 )
 
 
@@ -25,6 +25,9 @@ def knowledge_payload(request: Request) -> dict:
         **request.app.state.knowledge_service.info(),
         "model": settings.knowledge_model,
         "provider": settings.knowledge_provider,
+        "workflow": "langgraph_single",
+        "evidenceCheck": settings.knowledge_evidence_check,
+        "conversationPersistence": "connection",
     }
     retriever = getattr(request.app.state, "knowledge_retriever", None)
     if retriever is not None:
@@ -53,18 +56,16 @@ async def send_event(
     content: str = "",
     sources: list[KnowledgeSource] | None = None,
     request_id: str | None = None,
+    data: dict | None = None,
 ):
     event = KnowledgeEvent(
         type=event_type,
         content=content,
         sources=sources or [],
         request_id=request_id,
+        data=data,
     )
     await websocket.send_json(event.model_dump(by_alias=True, exclude_none=True))
-
-
-def source_models(results: list[KnowledgeSearchResult]) -> list[KnowledgeSource]:
-    return [KnowledgeSource.model_validate(result.source_dict()) for result in results]
 
 
 @router.get("/api/knowledge/info")
@@ -155,9 +156,11 @@ async def knowledge_socket(websocket: WebSocket):
 
     settings = get_settings()
     knowledge: KnowledgeService = websocket.app.state.knowledge_service
-    llm: KnowledgeLlmService = websocket.app.state.knowledge_llm_service
-    history: list[dict[str, str]] = []
-    last_answer_mode: str | None = None
+    workflow = getattr(websocket.app.state, "knowledge_workflow", None) or KnowledgeWorkflow(
+        settings, knowledge, websocket.app.state.knowledge_llm_service,
+        getattr(websocket.app.state, "knowledge_retriever", None),
+    )
+    session = {"history": [], "topic": "", "last_mode": None}
 
     await send_event(websocket, "connected", "故障诊断知识问答服务已连接")
     await send_event(websocket, "ready")
@@ -174,7 +177,7 @@ async def knowledge_socket(websocket: WebSocket):
                 await send_event(
                     websocket,
                     "error",
-                    str(error),
+                    "请求格式不正确，请检查问题长度、请求类型和 requestId。",
                     request_id=request_id,
                 )
                 continue
@@ -183,8 +186,7 @@ async def knowledge_socket(websocket: WebSocket):
                 await send_event(websocket, "closed")
                 break
             if request.type == "clear":
-                history.clear()
-                last_answer_mode = None
+                session = {"history": [], "topic": "", "last_mode": None}
                 await send_event(websocket, "cleared", "对话上下文已清空")
                 await send_event(websocket, "ready")
                 continue
@@ -207,121 +209,27 @@ async def knowledge_socket(websocket: WebSocket):
                 request_id=request_id,
             )
             try:
-                contextual_follow_up = bool(history) and is_contextual_follow_up(
-                    question
-                )
-                if contextual_follow_up:
-                    answer_mode = last_answer_mode or (
-                        "knowledge" if should_retrieve_knowledge(question) else "direct"
-                    )
-                    recent_user_questions = [
-                        message["content"]
-                        for message in history[-4:]
-                        if message["role"] == "user"
-                    ]
-                    retrieval_query = " ".join(
-                        [*recent_user_questions[-1:], question]
-                    )
-                else:
-                    # A standalone question starts a new diagnostic topic. Keeping
-                    # the prior topic here can dominate both retrieval and GLM output.
-                    history.clear()
-                    answer_mode = (
-                        "knowledge" if should_retrieve_knowledge(question) else "direct"
-                    )
-                    retrieval_query = question
-
-                await send_event(
-                    websocket,
-                    "route",
-                    answer_mode,
-                    request_id=request_id,
-                )
-
-                answer = ""
-                if answer_mode == "knowledge":
-                    await send_event(
-                        websocket,
-                        "status",
-                        "正在检索故障诊断知识库",
-                        request_id=request_id,
-                    )
-                    retriever = getattr(websocket.app.state, "knowledge_retriever", None)
-                    results = (
-                        await retriever.search(retrieval_query)
-                        if retriever is not None else knowledge.search(retrieval_query)
-                    )
-                    if not results:
-                        answer = (
-                            "当前知识库中没有足够信息。"
-                            "请补充设备类型、故障现象和监测数据。"
-                        )
+                async with aclosing(workflow.stream(question, session)) as events:
+                    async for event in events:
+                        if event["type"] == "_complete":
+                            session = event["data"]
+                            continue
+                        sources = [KnowledgeSource.model_validate(item) for item in event.get("sources", [])]
                         await send_event(
-                            websocket,
-                            "delta",
-                            answer,
-                            request_id=request_id,
+                            websocket, event["type"], event.get("content", ""),
+                            sources=sources, request_id=request_id, data=event.get("data"),
                         )
-                    else:
-                        await send_event(
-                            websocket,
-                            "sources",
-                            sources=source_models(results),
-                            request_id=request_id,
-                        )
-                        await send_event(
-                            websocket,
-                            "status",
-                            f"{llm.model_label} 正在分析检索结果",
-                            request_id=request_id,
-                        )
-                        context = knowledge.format_context(results)
-                        async for delta in llm.stream_answer(
-                            question, context, history
-                        ):
-                            answer += delta
-                            await send_event(
-                                websocket,
-                                "delta",
-                                delta,
-                                request_id=request_id,
-                            )
-                else:
-                    await send_event(
-                        websocket,
-                        "status",
-                        f"当前问题无需检索，{llm.model_label} 正在直接回答",
-                        request_id=request_id,
-                    )
-                    async for delta in llm.stream_direct_answer(question, history):
-                        answer += delta
-                        await send_event(
-                            websocket,
-                            "delta",
-                            delta,
-                            request_id=request_id,
-                        )
-
-                history.extend(
-                    [
-                        {"role": "user", "content": question},
-                        {"role": "assistant", "content": answer},
-                    ]
-                )
-                history_limit = settings.knowledge_history_turns * 2
-                if history_limit:
-                    history = history[-history_limit:]
-                else:
-                    history.clear()
-                last_answer_mode = answer_mode
 
                 await send_event(websocket, "done", request_id=request_id)
                 await send_event(websocket, "ready", request_id=request_id)
+            except WebSocketDisconnect:
+                raise
             except Exception as error:
+                logging.getLogger("uvicorn.error").warning("RAG request failed (%s)", type(error).__name__)
                 await send_event(
                     websocket,
                     "error",
-                    str(error),
+                    "问答处理失败，请检查后端日志、模型连接或额度后重试。",
                     request_id=request_id,
                 )
                 await send_event(websocket, "ready", request_id=request_id)

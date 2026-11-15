@@ -185,6 +185,100 @@ GET  /api/knowledge/indexes/{version}/chunks/{chunk_id}
 不依赖行号或全局顺序；前面插入段落不会改变后续未修改片段的 ID。
 来源事件包含 `chunkId`、`documentId`、`kbVersion` 和 `contentHash`。
 
+## 第二阶段：LangGraph 问答编排与评测
+
+后端使用 LangGraph 的单次有界工作流，继续兼容现有 `/ws/knowledge` 前端：
+
+```text
+conversation（路由、追问补全）
+  ├─ 通用问题 → generate
+  └─ 知识问题 → retrieve → assess
+                           ├─ 有全部或部分依据 → generate
+                           └─ 无依据或检查失败 → clarify
+                 → validate → finish
+```
+
+独立问题不调用改写模型。连续追问使用独立保存的故障主题与最近对话补全检索问题，
+即使历史被截断也保留原始主题；改写失败时退回“原始主题＋最近问题＋本轮追问”。
+显式更换设备主题会清除旧主题。基础路由与追问识别仍使用规则，并非模型语义路由。
+会话只在当前 WebSocket 连接内保存，清空或断开即释放，尚未接入 MySQL/Redis。
+
+检索后进行一次关闭思考的短 JSON 模型请求，判断资料是否支持问题，并选择可用证据：
+
+- 完整支持：生成带引用的答案。
+- 部分支持：只使用可用证据，回答中追加缺失资料的说明。
+- 无事实支持：说明知识不足并请求补充信息，不调用答案生成。
+- 证据检查超时、格式错误或连接失败：明确说明检查未完成，不把错误当成“知识库无答案”。
+- 问题明确指定的条目未被召回：不使用邻近条目替代。
+
+引用优先使用 `[资料1]`，编号对应本轮检索结果顺序。流式引用校验会暂存未闭合的方括号，
+检查引用是否属于本轮获准证据，再输出；无效引用替换为标记。支持资料编号、唯一条目编号、
+完整来源标签和简写章节标签。最终检查还会发现正文中未被证据支持的条目编号；缺少有效引用
+或存在无效引用时，在回答末尾追加警示。引用元数据绑定 `chunk_id`、文档和 `kb_version`。
+**该校验验证引用身份，不证明每个自然语言结论均被引用内容蕴含，也不能替代现场诊断核验。**
+
+新配置有默认值，已有服务器 `.env` 不必覆盖，按需补充：
+
+```dotenv
+KNOWLEDGE_REWRITE_FOLLOWUPS=true
+KNOWLEDGE_EVIDENCE_CHECK=model
+KNOWLEDGE_CONTROL_TIMEOUT_SECONDS=12
+```
+
+证据检查每轮知识问题增加一次模型请求；追问改写还增加一次。
+`KNOWLEDGE_CONTROL_TIMEOUT_SECONDS` 覆盖控制请求的排队和模型等待。
+可设 `KNOWLEDGE_EVIDENCE_CHECK=off` 对比旧路径延迟，关闭后仅保留无结果/指定条目缺失检查，
+失去模型语义充分性判断。引用校验继续启用。生成、向量、重排模型及 Milvus 目录配置不变。
+
+服务器更新（保持一个 worker；无需删除数据或手动重建索引）：
+
+```bash
+cd /root/system/aider-backend
+git pull --ff-only
+PYTHON_BIN=/opt/miniconda3/bin/python3 bash scripts/setup.sh
+.venv/bin/python -m app.manage check
+systemctl restart aider-backend
+.venv/bin/python -m app.manage smoke
+```
+
+`/api/knowledge/info` 增加 `workflow=langgraph_single`、`evidenceCheck` 和
+`conversationPersistence=connection`。原有事件不变，新增带 `data` 的 `assessment`、
+`validation`、`metrics` 事件，均携带原 `requestId`。旧前端可以忽略新事件，仍能看到
+状态、证据、流式回答及正文中的资料不足/引用警示。
+
+`metrics` 分别记录 `conversationMs`、`retrievalMs`（含召回与重排）、`assessmentMs`、
+`generationMs`、`firstContentMs` 和 `totalMs`，以及改写方式、证据结果和索引版本。
+第一字与完整耗时覆盖额外控制请求；不能只比较检索耗时来判断用户等待时间。
+
+### 评测方法
+
+仓库提供 `evaluation/fault_diagnosis.json`：32 组、38 轮问题，覆盖精确条目、语义表达、
+连续追问、资料不足和通用问题，使用原始故障诊断知识库作为标签依据。
+默认顺序请求运行中的服务，不另开 Milvus 客户端；每组新建连接，组内追问复用连接。
+
+```bash
+# 快速验证前 3 组
+.venv/bin/python -m app.manage evaluate --limit 3
+# 完整评测；会调用实际千问 API，消耗模型额度
+.venv/bin/python -m app.manage evaluate
+```
+
+报告默认保存在被 Git 忽略的 `storage/rag/evaluations/latest.json`，可通过 `--output` 改位置。
+报告包含每轮回答、来源、证据结果、引用校验及计时；汇总路由/答案支持检查、标签片段 Recall@5、
+引用身份通过率，以及独立知识问题和追问各自的均值、P50/P95（最近秩法）。
+检查失败不记为正确拒答；部分支持记为可回答，但报告标明缺失内容。
+报告逐轮保存进度；中途停止时可读取 `completed=false` 的部分报告。
+这些标签和引用检查不等于“诊断准确率”，需人工阅读报告核查事实支撑。
+服务器上传了不同知识库时，应同步维护评测标签；不要为通过测试强行放宽证据检查。
+
+开发机使用 290 个片段的热索引验证了整套 32 组/38 轮，标签检查全部通过。
+记录见 [开发基线](evaluation/stage2-baseline.json)，独立知识问题首字 P50 约 1.77 秒、
+完整回答 P50 约 3.62 秒，证据检查 P50 约 1.05 秒。
+这不是服务器 SLA，也不是诊断准确率；controller 的 331 个片段需在部署后另行评测。
+
+编排依据：[LangGraph 官方流式文档](https://docs.langchain.com/oss/python/langgraph/streaming)，
+通过 custom stream 保持现有 OpenAI 兼容模型客户端和 WebSocket 协议。
+
 ## 算法代码语言转换
 
 中心云后端以 `application/zip` 原始请求体提交算法包，Aider 在后台安全解压并

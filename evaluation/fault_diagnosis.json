@@ -1,0 +1,485 @@
+{
+  "version": 1,
+  "description": "原始列车故障诊断经验知识库的检索/路由/引用身份评测；不替代专家诊断准确性评估。",
+  "cases": [
+    {
+      "id": "sw-001",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-001，转辙机有哪些基本功能？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-001"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-002",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-002，转辙机的动作过程按什么顺序进行？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-002"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-003",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-003，5120型转辙机条目提到的振动采样频率是多少？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-003"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-005",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-005，转辙机振动信号如何变成CNN输入图像？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-005"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-011",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-011，电机堵转或卡阻有什么电流特征及可能原因？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-011"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-012",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-012，动作完成但无定位表示，知识库指出什么可能原因？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-012"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-013",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-013，缓冲装置失效的原因与振动特征是什么？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-013"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-014",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-014，杆件卡阻会出现什么电流曲线特征？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-014"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-018",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-018，润滑不良的可能原因和电流趋势是什么？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-018"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-021",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-021，锁闭装置磨损的故障现象和电流特征是什么？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-021"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-022",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-022，接点接触电阻增大有什么表示信号特征？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-022"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-030",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-030，目标域数据量对转辙机诊断准确率有何影响？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-030"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-041",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-041，动作时序各阶段的时间范围是什么？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-041"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sw-042",
+      "category": "exact_entry",
+      "turns": [
+        {
+          "question": "根据SW-042，小波变换建议使用哪些小波基和尺度？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-042"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-01",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机锁闭不到位，需要重复动作，可能与哪个部件的磨损有关？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-021"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-02",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "道岔转换过程中电流有二次峰值，可能是什么部件发生卡阻？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-014"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-03",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机动作后无定位表示，应重点检查什么接点？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-012"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-04",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机动作末尾冲击振动增大，与哪种弹簧疲劳有关？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-013"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-05",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机电流趋势逐渐增大且动作时间延长，可能是什么润滑问题？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-018"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-06",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机表示信号时有时无、出现抖动，可能是什么接点问题？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-022"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-07",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机减速器振动高频成分增强，与什么齿轮故障有关？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-016"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-08",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "冬季转辙机首次动作电流极大、动作困难，可能是什么原因？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-025"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-09",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机动作电流陡升并维持高位，且时间超限，可能是什么故障？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-011"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "semantic-10",
+      "category": "semantic",
+      "turns": [
+        {
+          "question": "转辙机锁闭阶段电流持续时间延长，知识库中哪个条目与此相关？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-021"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "followup-01",
+      "category": "followup",
+      "turns": [
+        {
+          "question": "转辙机锁闭装置磨损的故障表现是什么？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-021"
+          ]
+        },
+        {
+          "question": "这种故障的电流曲线有什么特征？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-021"
+          ]
+        },
+        {
+          "question": "那么对应的知识条目编号是什么？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-021"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "followup-02",
+      "category": "followup",
+      "turns": [
+        {
+          "question": "转辙机杆件卡阻有哪些可能原因？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-014"
+          ]
+        },
+        {
+          "question": "那转换过程的电流会怎样？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-014"
+          ]
+        },
+        {
+          "question": "这种现象对应哪个故障条目？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-014"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "followup-03",
+      "category": "followup",
+      "turns": [
+        {
+          "question": "转辙机润滑不良有什么故障表现？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-018"
+          ]
+        },
+        {
+          "question": "那它的电流趋势有什么变化？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-018"
+          ]
+        },
+        {
+          "question": "这种情况可能与油脂状态有什么关系？",
+          "route": "knowledge",
+          "answerable": true,
+          "entryIds": [
+            "SW-018"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "no-answer-01",
+      "category": "insufficient",
+      "turns": [
+        {
+          "question": "请解释故障条目SW-999的原因和处置方法。",
+          "route": "knowledge",
+          "answerable": false
+        }
+      ]
+    },
+    {
+      "id": "no-answer-02",
+      "category": "insufficient",
+      "turns": [
+        {
+          "question": "转辙机锁闭磨损现场，紧固螺栓的厂家规定扭矩精确是多少牛米？",
+          "route": "knowledge",
+          "answerable": false
+        }
+      ]
+    },
+    {
+      "id": "no-answer-03",
+      "category": "insufficient",
+      "turns": [
+        {
+          "question": "请根据故障知识库说明火星探测器离子推进器故障的检修参数。",
+          "route": "knowledge",
+          "answerable": false
+        }
+      ]
+    },
+    {
+      "id": "direct-01",
+      "category": "direct",
+      "turns": [
+        {
+          "question": "你好，请介绍一下你自己。",
+          "route": "direct"
+        }
+      ]
+    },
+    {
+      "id": "direct-02",
+      "category": "direct",
+      "turns": [
+        {
+          "question": "请解释什么是Python列表推导式。",
+          "route": "direct"
+        }
+      ]
+    }
+  ]
+}

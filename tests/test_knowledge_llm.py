@@ -89,7 +89,7 @@ class KnowledgeProviderApiTest(unittest.TestCase):
                 "# 故障诊断\n\n## 转辙机锁闭不到位\n\n锁闭装置磨损可能造成锁闭异常。",
                 encoding="utf-8",
             )
-            settings = Settings(knowledge_provider="qwen")
+            settings = Settings(knowledge_provider="qwen", knowledge_evidence_check="off")
             fake = FakeClient([chunk(content="可能原因："), chunk(content="锁闭装置磨损。")])
             app = FastAPI()
             app.state.knowledge_service = KnowledgeService(seed)
@@ -119,7 +119,9 @@ class KnowledgeProviderApiTest(unittest.TestCase):
             self.assertTrue(any(e["type"] == "sources" and e["sources"] for e in events))
             self.assertTrue(any("千问" in e.get("content", "") for e in events))
             deltas = [e["content"] for e in events if e["type"] == "delta"]
-            self.assertEqual(deltas, ["可能原因：", "锁闭装置磨损。"])
+            self.assertEqual(deltas[:2], ["可能原因：", "锁闭装置磨损。"])
+            validation = next(e["data"] for e in events if e["type"] == "validation")
+            self.assertTrue(validation["missingCitation"])
             self.assertTrue(all(e.get("requestId") == "qwen-rag-test" for e in events))
 
     def test_lifespan_uses_separate_clients_for_qwen_and_code_conversion(self):

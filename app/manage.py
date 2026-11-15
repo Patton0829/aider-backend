@@ -3,49 +3,24 @@ import argparse
 import asyncio
 import importlib.metadata
 import json
+from pathlib import Path
 import sys
-import time
 import urllib.error
 import urllib.request
 
-from app.core.config import Settings
+from app.core.config import PROJECT_ROOT, Settings
 
 
 async def smoke(settings: Settings, api_base: str, question: str) -> int:
-    import websockets
-    headers = {"Authorization": f"Bearer {settings.agent_api_token}"} if settings.agent_api_token else {}
-    websocket_base = api_base.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-    result = {"question": question, "deltaCount": 0}
-    async with websockets.connect(
-        websocket_base.rstrip("/") + "/ws/knowledge", proxy=None,
-        additional_headers=headers, open_timeout=10,
-    ) as socket:
-        async with asyncio.timeout(120):
-            while json.loads(await socket.recv())["type"] != "ready":
-                pass
-            started = time.perf_counter()
-            await socket.send(json.dumps({"type": "ask", "question": question, "requestId": "deployment-smoke"}))
-            while True:
-                event = json.loads(await socket.recv())
-                if event.get("requestId") != "deployment-smoke":
-                    continue
-                elapsed = round((time.perf_counter() - started) * 1000, 2)
-                if event["type"] == "sources":
-                    result["retrievalMs"] = elapsed
-                    result["sourceCount"] = len(event["sources"])
-                    result["indexVersions"] = sorted({s.get("kbVersion", "") for s in event["sources"]})
-                elif event["type"] == "delta" and event.get("content"):
-                    if not result["deltaCount"]:
-                        result["firstContentMs"] = elapsed
-                    result["deltaCount"] += 1
-                elif event["type"] == "done":
-                    result["totalMs"] = elapsed
-                elif event["type"] == "error":
-                    print("RAG smoke test returned a retrieval/model error; check backend logs.", file=sys.stderr)
-                    return 1
-                elif event["type"] == "ready":
-                    break
-    passed = result["deltaCount"] > 0 and result.get("sourceCount", 0) > 0 and "totalMs" in result
+    from app.evaluation import connection, run_turn, wait_ready
+    async with connection(settings, api_base) as socket:
+        await wait_ready(socket)
+        result = await run_turn(socket, question, "deployment-smoke")
+    result.pop("answer", None)
+    result.pop("sources", None)
+    passed = (result["deltaCount"] > 0 and result.get("sourceCount", 0) > 0
+              and "totalMs" in result and result.get("validation", {}).get("passed") is True
+              and result.get("assessment", {}).get("answerable") is True)
     if settings.knowledge_vector_store == "milvus_lite":
         versions = result.get("indexVersions", [])
         passed = passed and len(versions) == 1 and len(versions[0]) == 64
@@ -55,12 +30,20 @@ async def smoke(settings: Settings, api_base: str, question: str) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["check", "indexes", "rebuild", "activate", "smoke"])
+    parser.add_argument("command", choices=["check", "indexes", "rebuild", "activate", "smoke", "evaluate"])
     parser.add_argument("version", nargs="?")
     parser.add_argument("--api-base", default="http://127.0.0.1:8000")
     parser.add_argument("--question", default="转辙机锁闭不到位，可能有哪些原因？应按什么顺序检查？")
+    parser.add_argument("--dataset", type=Path, default=PROJECT_ROOT / "evaluation" / "fault_diagnosis.json")
+    parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "storage" / "rag" / "evaluations" / "latest.json")
+    parser.add_argument("--limit", type=int, help="Evaluate only the first N cases")
     args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
     settings = Settings.from_env()
+    if args.command == "evaluate":
+        from app.evaluation import evaluate
+        return asyncio.run(evaluate(settings, args.api_base, args.dataset, args.output, args.limit))
     if args.command == "smoke":
         try:
             return asyncio.run(smoke(settings, args.api_base, args.question))
@@ -69,12 +52,16 @@ def main():
             return 1
     if args.command == "check":
         failures = []
-        if sys.version_info < (3, 10):
-            failures.append("Python >= 3.10 is required")
+        if sys.version_info < (3, 12):
+            failures.append("Python >= 3.12 is required")
         needs_api_key = settings.knowledge_provider == "qwen" or settings.knowledge_retrieval_mode != "keyword" or settings.knowledge_rerank_enabled
         if needs_api_key and not settings.dashscope_api_key.strip():
             failures.append("DASHSCOPE_API_KEY is missing from .env")
         versions = {}
+        try:
+            versions["langgraph"] = importlib.metadata.version("langgraph")
+        except importlib.metadata.PackageNotFoundError:
+            failures.append("Missing package: langgraph; run scripts/setup.sh")
         if settings.knowledge_vector_store == "milvus_lite":
             for package in ["pymilvus", "milvus-lite", "faiss-cpu", "pyarrow"]:
                 try:
@@ -84,6 +71,8 @@ def main():
         print(json.dumps({
             "python": sys.version.split()[0], "provider": settings.knowledge_provider,
             "model": settings.knowledge_model, "vectorStore": settings.knowledge_vector_store,
+            "workflow": "langgraph_single", "evidenceCheck": settings.knowledge_evidence_check,
+            "rewriteFollowups": settings.knowledge_rewrite_followups,
             "knowledgeDirectory": str(settings.knowledge_base_dir),
             "milvusPath": str(settings.knowledge_milvus_uri),
             "catalogPath": str(settings.knowledge_index_catalog_path),

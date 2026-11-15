@@ -13,6 +13,7 @@ from app.services.knowledge import KnowledgeService
 from app.services.knowledge_llm import KnowledgeLlmService
 from app.services.rag_models import DashScopeRetrievalModels
 from app.services.rag_pipeline import RagPipeline
+from app.services.knowledge_workflow import KnowledgeWorkflow
 
 
 @asynccontextmanager
@@ -50,6 +51,9 @@ async def lifespan(app: FastAPI):
         if settings.knowledge_provider == "qwen":
             knowledge_llm = KnowledgeLlmService(settings)
         app.state.knowledge_llm_service = knowledge_llm
+        app.state.knowledge_workflow = KnowledgeWorkflow(
+            settings, app.state.knowledge_service, knowledge_llm, retriever,
+        )
         conversion_service = CodeConversionService(settings, app.state.glm_service.client)
         app.state.code_conversion_service = conversion_service
         await conversion_service.recover_incomplete_jobs()
