@@ -157,6 +157,17 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(call[0] == "rewrite" for call in self.llm.calls))
         self.assertEqual(events[-1]["type"], "_complete")
 
+    async def test_retrieval_cache_trace_is_forwarded_in_per_request_metrics(self):
+        from app.services.rag_pipeline import RetrievalOutcome
+        async def traced(query):
+            results = await self.retriever.search(query)
+            return RetrievalOutcome(results, {"recallCacheHit": True, "rerankCacheHit": True, "queryCacheState": "ready", "searchMs": 4.5})
+        self.retriever.search_with_trace = traced
+        metrics = self.data(await self.run_question(), "metrics")
+        self.assertTrue(metrics["recallCacheHit"])
+        self.assertTrue(metrics["rerankCacheHit"])
+        self.assertEqual(metrics["searchMs"], 4.5)
+
     async def test_followup_rewrites_and_retains_topic_after_history_trim(self):
         events = await self.run_question()
         session = self.data(events, "_complete")

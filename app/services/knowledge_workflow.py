@@ -39,6 +39,7 @@ class QuestionState(TypedDict, total=False):
     timings: dict
     started: float
     first_content_ms: float | None
+    retrieval_trace: dict
 
 
 def emit(kind: str, content: str = "", **extra):
@@ -111,9 +112,14 @@ class KnowledgeWorkflow:
     async def retrieve(self, state: QuestionState):
         started = time.perf_counter()
         emit("status", "正在检索故障诊断知识库")
-        results = await self.retriever.search(state["query"]) if self.retriever else self.knowledge.search(state["query"])
+        trace = {}
+        if self.retriever is not None and hasattr(self.retriever, "search_with_trace"):
+            outcome = await self.retriever.search_with_trace(state["query"])
+            results, trace = outcome.results, outcome.metrics
+        else:
+            results = await self.retriever.search(state["query"]) if self.retriever else self.knowledge.search(state["query"])
         emit("sources", sources=[result.source_dict() for result in results])
-        return {"results": results, "timings": timed(state, "retrievalMs", started)}
+        return {"results": results, "retrieval_trace": trace, "timings": timed(state, "retrievalMs", started)}
 
     async def assess(self, state: QuestionState):
         started = time.perf_counter()
@@ -216,7 +222,7 @@ class KnowledgeWorkflow:
         history = state["history"] + [{"role": "user", "content": state["question"]}, {"role": "assistant", "content": state["answer"]}]
         limit = self.settings.knowledge_history_turns * 2
         history = history[-limit:] if limit else []
-        metrics = {**state["timings"], "firstContentMs": state.get("first_content_ms"),
+        metrics = {**state["timings"], **state.get("retrieval_trace", {}), "firstContentMs": state.get("first_content_ms"),
                    "totalMs": round((time.perf_counter() - state["started"]) * 1000, 2),
                    "followUp": state["follow_up"], "rewrite": state["rewrite"],
                    "answerMode": state["mode"], "assessment": state.get("assessment_reason", "not_applicable"),

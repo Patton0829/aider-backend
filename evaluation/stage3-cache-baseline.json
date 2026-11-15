@@ -1,0 +1,62 @@
+{
+  "environment": {
+    "location": "development machine; not controller server",
+    "platform": "Darwin",
+    "architecture": "arm64",
+    "python": "3.12.13"
+  },
+  "models": {
+    "embedding": "qwen3.7-text-embedding",
+    "reranker": "qwen3.7-text-rerank"
+  },
+  "probe": {
+    "passed": true,
+    "sameResults": true,
+    "cache": {
+      "enabled": true,
+      "state": "ready",
+      "ttlSeconds": 300,
+      "retryAfterSeconds": 0,
+      "lastErrorType": null,
+      "counters": {
+        "recallMisses": 2,
+        "recallWrites": 2,
+        "rerankMisses": 2,
+        "rerankWrites": 2,
+        "recallHits": 3,
+        "rerankHits": 3
+      }
+    },
+    "first": {
+      "recallCacheHit": false,
+      "rerankCacheHit": false,
+      "rerankCacheEligible": true,
+      "recallMs": 198.85,
+      "rerankMs": 155.36,
+      "cacheCoalesced": false,
+      "queryCacheEnabled": true,
+      "queryCacheState": "ready",
+      "searchMs": 359.42
+    },
+    "second": {
+      "recallCacheHit": true,
+      "rerankCacheHit": true,
+      "rerankCacheEligible": true,
+      "recallMs": 0.51,
+      "rerankMs": 0.23,
+      "cacheCoalesced": false,
+      "queryCacheEnabled": true,
+      "queryCacheState": "ready",
+      "searchMs": 13.25
+    },
+    "sourceCount": 5,
+    "indexVersions": [
+      "8bb05e97595922b180d31d20619bcae5cb2bfca5e9ac569ba66e204deeb2a0f9"
+    ]
+  },
+  "notes": [
+    "Real Redis, Milvus Lite and DashScope APIs. The probe performs two sequential retrievals; it does not clear live keys.",
+    "Times cover retrieval only; evidence assessment and generation still execute per question.",
+    "The controller must install/enable Redis and run its own cache-smoke check."
+  ]
+}

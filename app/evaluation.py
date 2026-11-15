@@ -94,6 +94,8 @@ def summarize(rows: list[dict]) -> dict:
     valid = [r for r in rows if "error" not in r]
     recalls = [r["recallAt5"] for r in rows if "recallAt5" in r]
     generated = [r for r in valid if r.get("assessment", {}).get("answerable") is True]
+    cached = [r["metrics"] for r in valid if r.get("metrics", {}).get("queryCacheEnabled")]
+    reranked = [m for m in cached if m.get("rerankCacheEligible")]
     return {
         "turnCount": len(rows), "passed": sum(r.get("passed", False) for r in rows),
         "errors": sum("error" in r for r in rows),
@@ -101,6 +103,10 @@ def summarize(rows: list[dict]) -> dict:
         "answerabilityAccuracy": _check_rate(rows, "answerable"),
         "meanRecallAt5": round(sum(recalls) / len(recalls), 4) if recalls else None,
         "referenceIdentityPassRate": round(sum(r.get("validation", {}).get("passed", False) for r in generated) / len(generated), 4) if generated else None,
+        "cache": {"enabledTurns": len(cached), "coalescedTurns": sum(m.get("cacheCoalesced", False) for m in cached),
+                  "recallHitRate": round(sum(m.get("recallCacheHit", False) for m in cached) / len(cached), 4) if cached else None,
+                  "rerankHitRate": round(sum(m.get("rerankCacheHit", False) for m in reranked) / len(reranked), 4) if reranked else None,
+                  "degradedTurns": sum(m.get("queryCacheState") == "degraded" for m in cached)},
         "all": latency(valid), "standaloneKnowledge": latency([r for r in valid if r.get("route") == "knowledge" and not r.get("metrics", {}).get("followUp")]),
         "followupKnowledge": latency([r for r in valid if r.get("route") == "knowledge" and r.get("metrics", {}).get("followUp")]),
         "limits": "Reference identity and labelled retrieval/route checks only; claim entailment and diagnostic correctness require human review. Percentiles use nearest rank.",

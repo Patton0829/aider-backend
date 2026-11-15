@@ -5,17 +5,25 @@ import json
 import logging
 import math
 import time
-from dataclasses import replace
+import unicodedata
+from dataclasses import asdict, dataclass, replace
 
 from app.core.config import Settings
 from app.services.embedding_cache import EmbeddingCache
-from app.services.knowledge import KnowledgeChunk, KnowledgeSearchResult, KnowledgeService
+from app.services.knowledge import Bm25Index, KnowledgeChunk, KnowledgeSearchResult, KnowledgeService
 from app.services.rag_models import Embedder, Reranker, RetrievalModelError
 from app.services.vector_store import MilvusVectorStore, VectorStore
 from app.services.published_index import PublishedIndexManager
+from app.services.query_cache import QueryCache, SingleFlight, digest
 
 
 logger = logging.getLogger("uvicorn.error")
+
+
+@dataclass(frozen=True)
+class RetrievalOutcome:
+    results: list[KnowledgeSearchResult]
+    metrics: dict
 
 
 def chunk_text(chunk: KnowledgeChunk) -> str:
@@ -57,11 +65,14 @@ class RagPipeline:
         self, corpus: KnowledgeService, settings: Settings,
         embedder: Embedder | None = None, reranker: Reranker | None = None,
         vector_store: VectorStore | None = None,
+        query_cache: QueryCache | None = None,
     ):
         self.corpus = corpus
         self.settings = settings
         self.embedder = embedder
         self.reranker = reranker
+        self.query_cache = query_cache or QueryCache(settings)
+        self._flights = SingleFlight()
         if settings.knowledge_retrieval_mode != "keyword" and embedder is None:
             raise ValueError("Vector retrieval requires an embedder")
         if settings.knowledge_rerank_enabled and reranker is None:
@@ -152,21 +163,130 @@ class RagPipeline:
         return self.publisher.versions() if self.publisher else []
 
     async def close(self):
-        if self.publisher is not None:
-            await self.publisher.close()
+        try:
+            await self._flights.close()
+            await self.query_cache.close()
+        finally:
+            if self.publisher is not None:
+                await self.publisher.close()
 
     async def search(self, query: str) -> list[KnowledgeSearchResult]:
+        return (await self.search_with_trace(query)).results
+
+    async def search_with_trace(self, query: str) -> RetrievalOutcome:
         started = time.perf_counter()
-        if not query.strip():
-            return []
+        query = unicodedata.normalize("NFC", query.strip())
+        trace = {"recallCacheHit": False, "rerankCacheHit": False, "cacheCoalesced": False,
+                 "queryCacheEnabled": self.query_cache.enabled,
+                 "queryCacheState": self.query_cache.info()["state"]}
+        if not query:
+            return RetrievalOutcome([], trace)
+        # Capture the publication before accessing Redis, including on a hot cache hit.
         published = await self.publisher.for_query() if self.publisher is not None else None
         chunks = published.chunks if published is not None else self.corpus.snapshot()
         if not chunks:
-            return []
-        mode = self.settings.knowledge_retrieval_mode
+            return RetrievalOutcome([], trace)
+        version = published.version if published else digest([asdict(chunk) for chunk in chunks])
         limit = max(self.settings.knowledge_candidate_k, self.settings.knowledge_top_k)
+        recall_context = {
+            "query": digest(query), "version": version,
+            "corpusScope": digest(str(self.corpus.storage_dir or self.corpus.path)),
+            "accessScope": digest(self.settings.dashscope_api_key),
+            "scoringVersion": "bm25-rrf-v1", "embeddingProfile": self._namespace,
+            "mode": self.settings.knowledge_retrieval_mode,
+            "bm25K": self.settings.knowledge_bm25_recall_k,
+            "denseK": self.settings.knowledge_dense_recall_k,
+            "rrfK": self.settings.knowledge_rrf_k, "candidateK": limit,
+        }
+        flight_key = digest([recall_context, self._rerank_profile()])
+        work = lambda: self._search_snapshot(query, published, chunks, recall_context, limit)
+        if self.query_cache.enabled:
+            outcome, joined = await self._flights.run(flight_key, work)
+        else:
+            outcome, joined = await work(), False
+        metrics = {**outcome.metrics, "cacheCoalesced": joined,
+                   "queryCacheEnabled": self.query_cache.enabled,
+                   "queryCacheState": self.query_cache.info()["state"],
+                   "searchMs": round((time.perf_counter() - started) * 1000, 2)}
+        return RetrievalOutcome(list(outcome.results), metrics)
+
+    def _rerank_profile(self):
+        return {"enabled": self.settings.knowledge_rerank_enabled,
+                "model": self.settings.knowledge_rerank_model,
+                "endpoint": self.settings.retrieval_api_base_url if self.reranker else "",
+                "textFormat": "chunk-format-v1", "topK": self.settings.knowledge_top_k}
+
+    def _cached_results(self, stage, rows, by_id, limit):
+        if rows is None:
+            return None
+        valid = len(rows) <= limit and len({row.chunk_id for row in rows}) == len(rows)
+        for row in rows:
+            chunk = by_id.get(row.chunk_id)
+            valid = valid and chunk is not None and chunk.content_hash == row.content_hash
+            if stage == "rerank":
+                valid = valid and 0 <= row.score <= 1
+        if stage == "rerank" and by_id and not rows:
+            valid = False
+        if stage == "recall" and by_id and not rows and self.settings.knowledge_retrieval_mode != "keyword":
+            valid = False
+        if not valid:
+            self.query_cache.reject(stage)
+            return None
+        self.query_cache.hit(stage)
+        return [KnowledgeSearchResult(by_id[row.chunk_id], row.score) for row in rows]
+
+    async def _write_ranking(self, stage, context, results):
+        await self.query_cache.write(stage, context, [
+            {"chunk_id": r.chunk.chunk_id, "content_hash": r.chunk.content_hash, "score": r.score}
+            for r in results
+        ])
+
+    async def _search_snapshot(self, query, published, chunks, recall_context, limit):
+        started = time.perf_counter()
+        candidates = self._cached_results(
+            "recall", await self.query_cache.read("recall", recall_context),
+            {chunk.chunk_id: chunk for chunk in chunks}, limit,
+        )
+        recall_hit = candidates is not None
+        if candidates is None:
+            candidates = await self._recall(query, published, chunks, limit)
+            await self._write_ranking("recall", recall_context, candidates)
+        recalled_at = time.perf_counter()
+        rerank_hit = False
+        if self.settings.knowledge_rerank_enabled and candidates:
+            rerank_context = {
+                "recall": digest(recall_context), "profile": self._rerank_profile(),
+                "orderedCandidates": [[r.chunk.chunk_id, r.chunk.content_hash] for r in candidates],
+            }
+            results = self._cached_results(
+                "rerank", await self.query_cache.read("rerank", rerank_context),
+                {r.chunk.chunk_id: r.chunk for r in candidates}, self.settings.knowledge_top_k,
+            )
+            rerank_hit = results is not None
+            if results is None:
+                assert self.reranker is not None
+                matches = await self.reranker.rerank(
+                    query, [chunk_text(result.chunk) for result in candidates],
+                    self.settings.knowledge_top_k,
+                )
+                results = [KnowledgeSearchResult(candidates[m.index].chunk, m.score) for m in matches]
+                await self._write_ranking("rerank", rerank_context, results)
+        else:
+            results = candidates[:self.settings.knowledge_top_k]
+        if published is not None:
+            results = [replace(result, kb_version=published.version) for result in results]
+        trace = {"recallCacheHit": recall_hit, "rerankCacheHit": rerank_hit,
+                 "rerankCacheEligible": self.settings.knowledge_rerank_enabled and bool(candidates),
+                 "recallMs": round((recalled_at - started) * 1000, 2),
+                 "rerankMs": round((time.perf_counter() - recalled_at) * 1000, 2)}
+        logger.info("RAG retrieval: mode=%s candidates=%d results=%d timing=%s",
+                    self.settings.knowledge_retrieval_mode, len(candidates), len(results), trace)
+        return RetrievalOutcome(results, trace)
+
+    async def _recall(self, query, published, chunks, limit):
+        mode = self.settings.knowledge_retrieval_mode
         # Capture lexical results before awaiting APIs to keep one consistent corpus snapshot.
-        keyword = published.keyword if published is not None else self.corpus
+        keyword = published.keyword if published is not None else Bm25Index(chunks)
         lexical = keyword.search(query, self.settings.knowledge_bm25_recall_k) if mode != "vector" else []
         if mode == "keyword":
             candidates = lexical[:limit]
@@ -199,24 +319,7 @@ class RagPipeline:
                 candidates = reciprocal_rank_fusion(
                     [lexical, semantic], limit, self.settings.knowledge_rrf_k,
                 )
-        recalled_at = time.perf_counter()
-        if self.settings.knowledge_rerank_enabled and candidates:
-            assert self.reranker is not None
-            matches = await self.reranker.rerank(
-                query, [chunk_text(result.chunk) for result in candidates],
-                self.settings.knowledge_top_k,
-            )
-            results = [KnowledgeSearchResult(candidates[m.index].chunk, m.score) for m in matches]
-        else:
-            results = candidates[:self.settings.knowledge_top_k]
-        if published is not None:
-            results = [replace(result, kb_version=published.version) for result in results]
-        logger.info(
-            "RAG retrieval: mode=%s candidates=%d results=%d recall_ms=%.1f rerank_ms=%.1f total_ms=%.1f",
-            mode, len(candidates), len(results), (recalled_at - started) * 1000,
-            (time.perf_counter() - recalled_at) * 1000, (time.perf_counter() - started) * 1000,
-        )
-        return results
+        return candidates
 
     def info(self) -> dict:
         vector_enabled = self.settings.knowledge_retrieval_mode != "keyword"
@@ -235,6 +338,7 @@ class RagPipeline:
             "retrievalReady": current if vector_enabled else bool(self.corpus.chunks),
             "retrievalError": self._index_error,
             "vectorStore": "memory",
+            "queryCache": self.query_cache.info(),
         }
         if self.publisher is not None:
             result.update(self.publisher.info())

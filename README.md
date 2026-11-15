@@ -279,6 +279,114 @@ systemctl restart aider-backend
 编排依据：[LangGraph 官方流式文档](https://docs.langchain.com/oss/python/langgraph/streaming)，
 通过 custom stream 保持现有 OpenAI 兼容模型客户端和 WebSocket 协议。
 
+## 第三阶段：Redis 召回与重排缓存
+
+可选启用 Redis 两层缓存，默认 TTL 为 300 秒：
+
+1. 召回缓存：缓存 BM25/Dense/RRF 的候选片段 ID、内容哈希和分数；命中后跳过查询向量 API、
+   BM25、Milvus 检索与 RRF。
+2. 重排缓存：按问题、知识库版本、重排模型、TopK 和**有序候选片段**缓存重排结果；命中后跳过重排 API。
+
+缓存不保存问答原文、文档正文、模型密钥、证据检查结论或生成答案。
+查询只做 Unicode NFC 和首尾空白归一化，问题正文以哈希进入缓存键，不做语义相似缓存。
+追问使用补全后的检索问题，因此相同追问在不同上下文中可能产生不同缓存键。
+命中不会延长 TTL；模型配置、召回参数或 TTL 改动后使用对应的新键。
+
+每轮查询先固定发布版本，再访问缓存。键绑定知识库版本、语料目录、API 账号哈希、
+向量模型/维度/地址、召回模式与参数。缓存内容必须通过结构、数量、唯一性、有限分数、
+片段归属及内容哈希校验后，才从该版本快照恢复证据。上传、修改、删除文档后，新版本不会
+读到旧版本的结果；显式回滚后可复用尚未过期的对应版本缓存。旧键自行过期，不清空其他业务缓存。
+修改检索算法或缓存结构时，需要同步提升代码中的策略/缓存格式版本。
+
+Redis 连接或命令失败时继续执行原有检索链路，不改变知识库就绪状态。
+每次缓存命令最多等待 0.2 秒，失败后 30 秒内跳过缓存访问，再自动尝试恢复。
+日志和状态只报告错误类型，不输出 Redis URL 或密码。
+相同问题、版本和配置的并发检索在当前单 worker 内合并，某个用户断开不会取消其他用户共享的检索。
+这不是跨进程分布式锁；后续切到远端 Milvus 多副本部署时需要另行设计请求合并。
+
+### 在 controller 安装专用缓存实例
+
+先拉取代码和依赖：
+
+```bash
+cd /root/system/aider-backend
+git pull --ff-only
+PYTHON_BIN=/opt/miniconda3/bin/python3 bash scripts/setup.sh
+```
+
+已有可用 Redis 时，可直接配置它的连接地址，跳过以下专用实例安装。
+以下配置使用独立的 `127.0.0.1:6380`，不改动已有 6379 实例的配置；若 6380 已被其他服务占用，
+应先选择其他端口并同步修改配置与 `REDIS_URL`，不要停止不明进程。
+
+```bash
+apt-get update
+apt-get install -y redis-server
+install -m 644 deploy/redis-rag.conf /etc/redis/aider-rag.conf
+install -m 644 deploy/aider-rag-redis.service /etc/systemd/system/aider-rag-redis.service
+systemctl daemon-reload
+systemctl enable --now aider-rag-redis
+redis-cli -h 127.0.0.1 -p 6380 ping
+```
+
+该实例仅用于临时缓存，限制内存 128 MB、使用 allkeys-lru，并关闭磁盘持久化。
+知识库及索引仍存放于原有 Milvus/SQLite，Redis 重启后的首次查询会重新填充缓存。
+
+在服务器原有 `.env` 中补充或修改以下字段（不要覆盖密钥、模型、路径等现有配置）：
+
+```dotenv
+KNOWLEDGE_CACHE_ENABLED=true
+REDIS_URL=redis://127.0.0.1:6380/0
+KNOWLEDGE_CACHE_TTL_SECONDS=300
+```
+
+默认关闭缓存，保证没有 Redis 的既有部署可以继续运行。
+可选配置 `KNOWLEDGE_CACHE_NAMESPACE`、`KNOWLEDGE_CACHE_TIMEOUT_SECONDS` 和
+`KNOWLEDGE_CACHE_RETRY_SECONDS`，见 `.env.example`。远端有认证/TLS 的 Redis 应在本地 `.env`
+配置实际 `redis://` / `rediss://` 地址，密钥不要提交 Git。
+
+```bash
+.venv/bin/python -m app.manage check
+systemctl restart aider-backend
+curl -fsS --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8000/health
+.venv/bin/python -m app.manage cache-check
+.venv/bin/python -m app.manage cache-smoke
+.venv/bin/python -m app.manage smoke
+```
+
+`cache-check` 通过运行中的后端检查缓存连接；看到 `state=ready` 才代表后端真实连接成功。
+`manage check` 只检查配置与 Python 依赖，不探测 Redis。
+`cache-smoke` 连续执行两次真实检索，验证第二次缓存命中以及片段 ID、内容哈希、分数和版本一致；
+不会清理已有缓存，也不调用证据检查或答案生成。第一次可能已经命中，不能一概称为冷查询。
+返回 `passed=true` 且第二次 `recallCacheHit=true`、`rerankCacheHit=true` 表示两层均生效。
+`smoke` 则继续验证完整问答与引用。
+
+管理端点均沿用 `AGENT_API_TOKEN` Bearer 鉴权：
+
+```text
+GET  /api/knowledge/cache
+POST /api/knowledge/cache/probe   {"question":"转辙机锁闭不到位的原因是什么？"}
+```
+
+`/api/knowledge/info` 增加 `queryCache`；WebSocket 的 `metrics` 增加 `queryCacheEnabled`、
+`queryCacheState`、`recallCacheHit`、`rerankCacheHit`、`cacheCoalesced`、`recallMs`、`rerankMs`
+和 `searchMs`。缓存命中标志是本次检索的局部数据，不使用共享的“最后一次命中”变量，避免并发串扰。
+缓存状态的 counters 为当前后端进程累计值，重启后归零。
+完整评测报告新增缓存命中率、合并请求数和降级轮数；Redis 状态、URL 与凭据不会进入生成提示。
+
+开发机真实 Redis＋千问＋Milvus 联调中，同一问题首次检索约 359 ms，缓存命中约 13 ms，
+证据与版本一致，见 [缓存探测记录](evaluation/stage3-cache-baseline.json)。这是检索阶段数据；
+证据检查和回答生成仍需模型请求，不代表整轮回答也缩短相同比例。
+
+运行包含真实 Redis 的回归测试：
+
+```bash
+RAG_TEST_REDIS_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m unittest discover -s tests -q
+```
+
+测试使用独立随机键前缀，不清空 Redis；不设置测试地址时跳过真实 Redis 连接测试。
+
+异步连接、超时与客户端关闭遵循 [Redis 官方 Python 异步客户端文档](https://redis.io/docs/latest/develop/clients/redis-py/async/)。
+
 ## 算法代码语言转换
 
 中心云后端以 `application/zip` 原始请求体提交算法包，Aider 在后台安全解压并

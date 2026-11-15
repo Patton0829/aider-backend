@@ -3,13 +3,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
     dashscope_api_key: str = ""
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_plus_model: str = "qwen3-coder-plus"
@@ -70,6 +71,28 @@ class Settings(BaseModel):
     knowledge_rerank_model: str = "qwen3.7-text-rerank"
     knowledge_retrieval_timeout_seconds: float = Field(default=30.0, gt=0)
     dashscope_http_base_url: str = ""
+    knowledge_cache_enabled: bool = False
+    knowledge_cache_ttl_seconds: int = Field(default=300, ge=1, le=86400)
+    knowledge_cache_namespace: str = Field(default="control-center-rag", pattern=r"^[a-zA-Z0-9:_-]{1,64}$")
+    knowledge_cache_timeout_seconds: float = Field(default=0.2, gt=0, le=5)
+    knowledge_cache_retry_seconds: float = Field(default=30, gt=0, le=300)
+    redis_url: str = Field(default="redis://127.0.0.1:6380/0", repr=False)
+
+    @field_validator("redis_url")
+    @classmethod
+    def validate_redis_url(cls, value: str) -> str:
+        from urllib.parse import urlsplit
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme not in ("redis", "rediss") or not parsed.hostname or parsed.netloc.endswith(":"):
+                raise ValueError
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                raise ValueError
+            if parsed.path not in ("", "/") and not parsed.path.removeprefix("/").isdigit():
+                raise ValueError
+        except ValueError:
+            raise ValueError("REDIS_URL must be a valid redis:// or rediss:// address") from None
+        return value
 
     aider_source_root: Path = PROJECT_ROOT.parent / "aider"
     aider_model: str = "openai/qwen3-coder-plus"

@@ -80,6 +80,36 @@ async def knowledge_indexes(request: Request):
     return {"activeVersion": retriever.info().get("indexVersion"), "versions": retriever.index_versions()}
 
 
+@router.get("/api/knowledge/cache")
+async def knowledge_cache_status(request: Request):
+    authorize_http(request)
+    return await request.app.state.knowledge_retriever.query_cache.ping()
+
+
+@router.post("/api/knowledge/cache/probe")
+async def knowledge_cache_probe(request: Request, body: KnowledgeRequest):
+    authorize_http(request)
+    if body.type != "ask" or not body.question.strip():
+        raise HTTPException(status_code=400, detail="提供非空的检索问题")
+    retriever = request.app.state.knowledge_retriever
+    # These are ordinary retrievals; never evict live keys just to make a 'cold' benchmark.
+    try:
+        first = await retriever.search_with_trace(body.question)
+        second = await retriever.search_with_trace(body.question)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="检索验证失败，请检查模型、索引状态和后端日志") from error
+    identity = lambda result: (result.chunk.chunk_id, result.chunk.content_hash, result.score, result.kb_version)
+    stable = [identity(r) for r in first.results] == [identity(r) for r in second.results]
+    ready = retriever.query_cache.info()["state"] == "ready"
+    passed = bool(second.results) and stable and ready and second.metrics["recallCacheHit"]
+    if retriever.settings.knowledge_rerank_enabled:
+        passed = passed and second.metrics["rerankCacheHit"]
+    return {"passed": passed, "sameResults": stable, "cache": retriever.query_cache.info(),
+            "first": first.metrics, "second": second.metrics,
+            "sourceCount": len(second.results),
+            "indexVersions": sorted({r.kb_version for r in second.results if r.kb_version})}
+
+
 @router.post("/api/knowledge/indexes/rebuild")
 async def rebuild_knowledge_index(request: Request):
     authorize_http(request)

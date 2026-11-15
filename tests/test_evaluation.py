@@ -47,6 +47,19 @@ class EvaluationTest(unittest.TestCase):
         self.assertEqual(report["meanRecallAt5"], 0)
         self.assertEqual(report["routeAccuracy"], 0)
 
+    def test_cache_report_counts_degraded_requests_and_excludes_disabled_requests(self):
+        rows = [
+            {"metrics": {"queryCacheEnabled": True, "recallCacheHit": True, "rerankCacheHit": True, "rerankCacheEligible": True, "queryCacheState": "ready"}},
+            {"metrics": {"queryCacheEnabled": True, "recallCacheHit": False, "rerankCacheHit": False, "rerankCacheEligible": True, "queryCacheState": "degraded", "cacheCoalesced": True}},
+            {"metrics": {"queryCacheEnabled": False, "recallCacheHit": False}},
+        ]
+        cache = summarize(rows)["cache"]
+        self.assertEqual(cache["enabledTurns"], 2)
+        self.assertEqual(cache["recallHitRate"], .5)
+        self.assertEqual(cache["rerankHitRate"], .5)
+        self.assertEqual(cache["degradedTurns"], 1)
+        self.assertEqual(cache["coalescedTurns"], 1)
+
     def test_all_dataset_entry_labels_exist_in_committed_knowledge(self):
         root = Path(__file__).resolve().parents[1]
         chunks = parse_markdown((root / "列车故障诊断经验知识库.md").read_text())
