@@ -100,6 +100,28 @@ def is_conversation_recall(question: str) -> bool:
     return any(pattern.search(normalized) for pattern in CONVERSATION_RECALL_PATTERNS)
 
 
+def citation_labels(results: list["KnowledgeSearchResult"]) -> list[str]:
+    """Readable reference identities; entry IDs alone must be unique this turn."""
+    counts = Counter((r.chunk.entry_id or "").upper() for r in results)
+    labels = []
+    for result in results:
+        chunk = result.chunk
+        entry = (chunk.entry_id or "").upper()
+        if entry and counts[entry] == 1:
+            labels.append(entry)
+            continue
+        document = re.sub(r"[\[\]\r\n]", "_", chunk.document)
+        if len(document) > 80:
+            document = document[:70] + "…" + hashlib.sha256(chunk.document.encode()).hexdigest()[:8]
+        lines = f"L{chunk.line_start}" + (f"-{chunk.line_end}" if chunk.line_end != chunk.line_start else "")
+        location = f"{document}:{lines}"
+        labels.append(f"{entry} / {location}" if entry else location)
+    normalized = [re.sub(r"\s+", "", label).casefold() for label in labels]
+    duplicates = Counter(normalized)
+    return [f"{label} / 片段{index}" if duplicates[normalized[index-1]] > 1 else label
+            for index, label in enumerate(labels, 1)]
+
+
 def should_retrieve_knowledge(question: str) -> bool:
     normalized = "".join(question.lower().split())
     if not normalized:
@@ -467,9 +489,10 @@ class KnowledgeService:
 
     def format_context(self, results: list[KnowledgeSearchResult]) -> str:
         blocks = []
-        for index, result in enumerate(results, start=1):
+        for index, (result, label) in enumerate(zip(results, citation_labels(results)), start=1):
             blocks.append(
                 f"[资料{index}] 文档：{result.chunk.document}；"
+                f"回答引用标识：[{label}]；"
                 f"来源：{result.chunk.source_label}；"
                 f"片段ID：{result.chunk.chunk_id}；版本：{result.kb_version or '未发布'}；"
                 f"原文行：{result.chunk.line_start}-{result.chunk.line_end}\n"

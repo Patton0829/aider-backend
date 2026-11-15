@@ -75,7 +75,7 @@ class CitationGuardTest(unittest.TestCase):
     def test_split_reference_is_held_until_validated(self):
         guard = CitationGuard([result()], [1])
         self.assertEqual(guard.feed("磨损[资"), "磨损")
-        self.assertEqual(guard.feed("料1]"), "[资料1]")
+        self.assertEqual(guard.feed("料1]"), "[SW-021]")
         self.assertEqual(guard.report()["citations"][0]["kb_version"], "a" * 64)
 
     def test_invalid_reference_never_streams(self):
@@ -87,7 +87,7 @@ class CitationGuardTest(unittest.TestCase):
 
     def test_valid_entry_and_short_chapter_label_are_canonicalized(self):
         guard = CitationGuard([result()], [1])
-        self.assertEqual(guard.feed("[SW-021][第三章 / 3.2 / SW-021]"), "[资料1][资料1]")
+        self.assertEqual(guard.feed("[SW-021][第三章 / 3.2 / SW-021]"), "[SW-021][SW-021]")
         self.assertTrue(guard.report()["passed"])
 
     def test_wrong_chapter_and_unapproved_source_are_rejected(self):
@@ -98,7 +98,7 @@ class CitationGuardTest(unittest.TestCase):
     def test_duplicate_entry_id_is_not_resolved_arbitrarily(self):
         guard = CitationGuard([result(), result(number=2)], [1, 2])
         self.assertIn("未通过校验", guard.feed("[SW-021]"))
-        self.assertEqual(guard.feed("[资料2]"), "[资料2]")
+        self.assertEqual(guard.feed("[资料2]"), "[SW-021 / 故障.md:L127 / 片段2]")
 
     def test_incomplete_reference_is_marked_and_buffer_is_bounded(self):
         for text in ("[资料1", "[" + "x" * 300):
@@ -118,9 +118,9 @@ class CitationGuardTest(unittest.TestCase):
 
     def test_combined_source_and_entry_must_refer_to_same_chunk(self):
         guard = CitationGuard([result(), result("SW-022", 2)], [1, 2])
-        self.assertEqual(guard.feed("[资料1 / SW-021]"), "[资料1]")
+        self.assertEqual(guard.feed("[资料1 / SW-021]"), "[SW-021]")
         self.assertIn("未通过校验", guard.feed("[资料1 / SW-022]"))
-        self.assertEqual(guard.feed("[来源：资料1 / 第三章 / 3.2 / SW-021]"), "[资料1]")
+        self.assertEqual(guard.feed("[来源：资料1 / 第三章 / 3.2 / SW-021]"), "[SW-021]")
         self.assertIn("未通过校验", guard.feed("[资料2 / 第三章 / 3.2 / SW-021]"))
 
     def test_explicit_cross_reference_may_be_mentioned_but_not_cited_independently(self):
@@ -131,6 +131,35 @@ class CitationGuardTest(unittest.TestCase):
         guard.feed("需与SW-013区分[资料1]。")
         self.assertTrue(guard.report()["passed"])
         guard.feed("[SW-013]")
+        self.assertFalse(guard.report()["passed"])
+
+    def test_entry_identity_is_case_insensitive_and_streams_across_chunks(self):
+        guard = CitationGuard([result("sw-016")], [1])
+        self.assertEqual(guard.feed("磨损[sw-"), "磨损")
+        self.assertEqual(guard.feed("016]"), "[SW-016]")
+        self.assertEqual(guard.report()["citations"][0]["citationLabel"], "SW-016")
+        self.assertTrue(guard.report()["passed"])
+
+    def test_unnumbered_sources_use_document_and_lines(self):
+        item = result()
+        item = replace(item, chunk=replace(item.chunk, entry_id=None, content="机械磨损", document="说明.txt", line_start=14, line_end=18))
+        guard = CitationGuard([item], [1])
+        self.assertEqual(guard.feed("原文[资料1]。"), "原文[说明.txt:L14-18]。")
+        self.assertEqual(guard.feed("[说明.txt:L14-18]"), "[说明.txt:L14-18]")
+        self.assertTrue(guard.report()["passed"])
+        self.assertIn("未通过校验", guard.feed("[说明.txt:L99]"))
+        self.assertFalse(guard.report()["passed"])
+
+    def test_duplicate_entries_in_different_documents_keep_document_identity(self):
+        first = result("SW-016")
+        second = replace(result("SW-016", 2), chunk=replace(result("SW-016", 2).chunk, document="另一份.md"))
+        guard = CitationGuard([first, second], [1, 2])
+        self.assertEqual(guard.feed("[资料1][资料2]"), "[SW-016 / 故障.md:L127][SW-016 / 另一份.md:L127]")
+        self.assertEqual([c["sourceNumber"] for c in guard.report()["citations"]], [1, 2])
+
+    def test_unapproved_entry_is_rejected_even_when_present_in_results(self):
+        guard = CitationGuard([result("SW-016"), result("SW-017", 2)], [1])
+        self.assertIn("未通过校验", guard.feed("[SW-017]"))
         self.assertFalse(guard.report()["passed"])
 
 

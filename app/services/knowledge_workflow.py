@@ -14,7 +14,7 @@ from app.services.conversation_memory import ConversationMemory
 from app.services.context_budget import ContextBudget, ContextBudgetExceeded, text_tokens
 from app.services.knowledge import (
     ENTRY_ID_RE, KnowledgeSearchResult, KnowledgeService,
-    is_contextual_follow_up, is_conversation_recall, should_retrieve_knowledge,
+    citation_labels, is_contextual_follow_up, is_conversation_recall, should_retrieve_knowledge,
 )
 
 
@@ -201,8 +201,9 @@ class KnowledgeWorkflow:
         guard = CitationGuard(state["results"], state["evidence_numbers"]) if knowledge_mode else None
         if knowledge_mode:
             # Preserve original source numbers while excluding unapproved evidence.
+            labels = citation_labels(state["results"])
             context = "\n\n".join(
-                f"[资料{n}] 来源：{state['results'][n-1].chunk.source_label}\n{state['results'][n-1].chunk.content}"
+                f"[资料{n}] 回答引用标识：[{labels[n-1]}]；来源：{state['results'][n-1].chunk.source_label}\n{state['results'][n-1].chunk.content}"
                 for n in state["evidence_numbers"]
             )
             if state["missing"]:

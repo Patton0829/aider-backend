@@ -1,7 +1,7 @@
 """Validate reference identity before streaming it; this is not claim entailment."""
 import re
 
-from app.services.knowledge import ENTRY_ID_RE, KnowledgeSearchResult
+from app.services.knowledge import ENTRY_ID_RE, KnowledgeSearchResult, citation_labels
 
 
 def compact(value: str) -> str:
@@ -15,6 +15,7 @@ class CitationGuard:
         self.validated: dict[int, dict] = {}
         self.invalid: list[str] = []
         self.seen_text = ""
+        self.labels = citation_labels(results)
         # Cross-references explicitly present in an approved passage may be mentioned,
         # but cannot be cited as independent sources without their own approved chunk.
         self.allowed_entries = {
@@ -23,11 +24,14 @@ class CitationGuard:
         } | {
             results[number - 1].chunk.entry_id.upper() for number in allowed_numbers
             if results[number - 1].chunk.entry_id
+        } | {
+            entry.upper() for number in allowed_numbers
+            for entry in ENTRY_ID_RE.findall(self.labels[number - 1])
         }
         for number in allowed_numbers:
             result = results[number - 1]
             # Bare entry IDs must be unambiguous across documents.
-            aliases = [f"资料{number}", result.chunk.source_label]
+            aliases = [f"资料{number}", result.chunk.source_label, self.labels[number - 1]]
             if result.chunk.entry_id:
                 aliases.append(f"资料{number} / {result.chunk.entry_id}")
             chapter = re.search(r"第[一二三四五六七八九十百零〇\d]+章", result.chunk.chapter)
@@ -37,22 +41,23 @@ class CitationGuard:
                 aliases.append(f"{chapter[0]} / {result.chunk.entry_id}")
                 aliases.append(f"资料{number} / {chapter[0]} / {section[0]} / {result.chunk.entry_id}")
             if result.chunk.entry_id and sum(
-                r.chunk.entry_id == result.chunk.entry_id for r in results
+                (r.chunk.entry_id or "").upper() == result.chunk.entry_id.upper() for r in results
             ) == 1:
                 aliases.append(result.chunk.entry_id)
-            for alias in set(aliases):
-                if alias:
-                    self.references.setdefault(compact(alias), []).append((number, result))
+            for alias in {compact(alias) for alias in aliases if alias}:
+                self.references.setdefault(alias, []).append((number, result))
 
     def _reference(self, value: str) -> str:
         reference = re.sub(r"^\s*(?:来源|引用)\s*[:：]\s*", "", value)
         matches = self.references.get(compact(reference), [])
         if len(matches) == 1:
             number, result = matches[0]
-            self.validated[number] = {"sourceNumber": number, **result.source_dict()}
-            return f"[资料{number}]"
+            label = self.labels[number - 1]
+            self.validated[number] = {"sourceNumber": number, "citationLabel": label, **result.source_dict()}
+            return f"[{label}]"
         looks_like_reference = bool(
             re.search(r"资料|第.{1,12}[章节]|[A-Za-z]{2,8}-\d+", value)
+            or re.search(r":L\d+(?:-\d+)?", value, re.IGNORECASE)
             or re.fullmatch(r"\s*\d+\s*", value)
         )
         if looks_like_reference:
