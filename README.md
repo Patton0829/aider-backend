@@ -418,12 +418,22 @@ HTTP 通过 `X-Conversation-Token`，WebSocket 通过消息体 `ownerToken` 提�
 
 ```dotenv
 KNOWLEDGE_HISTORY_STORE=mysql
-KNOWLEDGE_DATABASE_URL=mysql+asyncmy://aider_rag:本机配置的URL编码密码@127.0.0.1:3306/aider_rag
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=aider_rag
+DB_USERNAME=aider_rag
+DB_PASSWORD="本机配置的原始密码"
+KNOWLEDGE_DATABASE_URL=
 KNOWLEDGE_HISTORY_DB_TIMEOUT_SECONDS=5
 KNOWLEDGE_HISTORY_LEASE_SECONDS=300
 ```
 
-连接串只放在服务器 `.env`。密码含特殊字符时需 URL 编码；首次配置可使用下面的辅助脚本，
+配置只放在 `aider-backend/.env`，不读取中心云后端的 `.env`。连接 RDS 时将 `DB_HOST`、
+`DB_PORT` 改为客户端使用的数据库连接地址和端口，`DB_DATABASE` 填专用库 `aider_rag`。
+`DB_PASSWORD` 直接填写原始密码，程序自动完成 URL 编码；密码含 `#` 或空格时用双引号包住。
+兼容旧的 `KNOWLEDGE_DATABASE_URL`：非空时优先使用连接串，使用分项配置时必须删除或留空该项。
+同名进程环境变量优先于 `.env` 文件中的值。
+首次配置本机 MySQL 可使用下面的辅助脚本（RDS 已建库、已有账号时无需运行），
 它生成独立随机密码并直接写入本地文件，保留现有模型、密钥、路径及 Redis 配置。
 MySQL/MariaDB 业务实例如已存在，不要为本功能重新安装或替换数据库服务。
 初始化命令显式创建新表，不在每次后端启动时自动建表或升级表结构。

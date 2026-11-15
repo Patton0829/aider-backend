@@ -80,7 +80,7 @@ def main():
         if needs_api_key and not settings.dashscope_api_key.strip():
             failures.append("DASHSCOPE_API_KEY is missing from .env")
         if settings.knowledge_history_store == "mysql" and not settings.knowledge_database_url:
-            failures.append("KNOWLEDGE_DATABASE_URL is required when MySQL history is enabled")
+            failures.append("Set DB_HOST/DB_USERNAME/DB_DATABASE or KNOWLEDGE_DATABASE_URL when MySQL history is enabled")
         versions = {}
         try:
             versions["langgraph"] = importlib.metadata.version("langgraph")

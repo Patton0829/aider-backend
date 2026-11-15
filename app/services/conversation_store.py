@@ -89,7 +89,7 @@ class ConversationStore:
         self.settings, self.clock = settings, clock
         if engine is None:
             if not settings.knowledge_database_url:
-                raise ValueError("Set KNOWLEDGE_DATABASE_URL before enabling MySQL history")
+                raise ValueError("Set DB_HOST/DB_USERNAME/DB_DATABASE or KNOWLEDGE_DATABASE_URL before enabling MySQL history")
             engine = create_async_engine(
                 settings.knowledge_database_url, echo=False, hide_parameters=True,
                 pool_pre_ping=True, pool_recycle=1800, pool_size=5, max_overflow=5,

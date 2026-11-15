@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -79,8 +79,28 @@ class Settings(BaseModel):
     redis_url: str = Field(default="redis://127.0.0.1:6380/0", repr=False)
     knowledge_history_store: Literal["off", "mysql"] = "off"
     knowledge_database_url: str = Field(default="", repr=False)
+    db_host: str = ""
+    db_port: int = Field(default=3306, ge=1, le=65535)
+    db_database: str = "aider_rag"
+    db_username: str = ""
+    db_password: str = Field(default="", repr=False)
     knowledge_history_db_timeout_seconds: float = Field(default=5, gt=0, le=30)
     knowledge_history_lease_seconds: int = Field(default=300, ge=30, le=3600)
+
+    @model_validator(mode="after")
+    def build_database_url(self):
+        # Keep existing deployments compatible: an explicit URL takes precedence.
+        if self.knowledge_database_url or not self.db_host.strip():
+            return self
+        if not self.db_username.strip() or not self.db_database.strip():
+            raise ValueError("DB_USERNAME and DB_DATABASE are required when DB_HOST is set")
+        from sqlalchemy.engine import URL
+        self.knowledge_database_url = URL.create(
+            "mysql+asyncmy", host=self.db_host.strip(), port=self.db_port,
+            database=self.db_database.strip(), username=self.db_username.strip(),
+            password=self.db_password,
+        ).render_as_string(hide_password=False)
+        return self
 
     @field_validator("knowledge_database_url")
     @classmethod
@@ -154,7 +174,10 @@ class Settings(BaseModel):
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, value = line.split("=", 1)
-                values[key.strip().lower()] = value.strip().strip("\"'")
+                value = value.strip()
+                if len(value) >= 2 and value[0] in ("\"", "'") and value[-1] == value[0]:
+                    value = value[1:-1]
+                values[key.strip().lower()] = value
 
         for field_name in cls.model_fields:
             env_name = field_name.upper()
