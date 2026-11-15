@@ -8,6 +8,8 @@ from app.core.config import get_settings
 from app.core.security import authorize_http, authorize_websocket
 from app.schemas.knowledge import KnowledgeEvent, KnowledgeRequest, KnowledgeSource
 from app.services.knowledge_workflow import KnowledgeWorkflow
+from app.services.conversation_session import ConversationSession
+from app.services.conversation_store import HistoryError
 from app.services.knowledge import (
     KnowledgeDocumentConflictError,
     KnowledgeDocumentNotFoundError,
@@ -29,6 +31,10 @@ def knowledge_payload(request: Request) -> dict:
         "evidenceCheck": settings.knowledge_evidence_check,
         "conversationPersistence": "connection",
     }
+    history_store = getattr(request.app.state, "conversation_store", None)
+    if history_store is not None:
+        payload["conversationPersistence"] = "mysql"
+        payload["historyStore"] = history_store.info()
     retriever = getattr(request.app.state, "knowledge_retriever", None)
     if retriever is not None:
         payload.update(retriever.info())
@@ -57,6 +63,7 @@ async def send_event(
     sources: list[KnowledgeSource] | None = None,
     request_id: str | None = None,
     data: dict | None = None,
+    conversation_id: str | None = None,
 ):
     event = KnowledgeEvent(
         type=event_type,
@@ -64,6 +71,7 @@ async def send_event(
         sources=sources or [],
         request_id=request_id,
         data=data,
+        conversation_id=conversation_id,
     )
     await websocket.send_json(event.model_dump(by_alias=True, exclude_none=True))
 
@@ -190,7 +198,7 @@ async def knowledge_socket(websocket: WebSocket):
         settings, knowledge, websocket.app.state.knowledge_llm_service,
         getattr(websocket.app.state, "knowledge_retriever", None),
     )
-    session = {"history": [], "topic": "", "last_mode": None}
+    session = ConversationSession(getattr(websocket.app.state, "conversation_store", None))
 
     await send_event(websocket, "connected", "故障诊断知识问答服务已连接")
     await send_event(websocket, "ready")
@@ -215,10 +223,18 @@ async def knowledge_socket(websocket: WebSocket):
             if request.type == "close":
                 await send_event(websocket, "closed")
                 break
-            if request.type == "clear":
-                session = {"history": [], "topic": "", "last_mode": None}
-                await send_event(websocket, "cleared", "对话上下文已清空")
-                await send_event(websocket, "ready")
+            if request.type in ("clear", "resume"):
+                try:
+                    if request.type == "resume":
+                        result = await session.resume(request)
+                        await send_event(websocket, "history", data=result, request_id=request.request_id, conversation_id=session.identity)
+                    else:
+                        await session.clear(request)
+                        await send_event(websocket, "cleared", "对话上下文已清空", request_id=request.request_id, conversation_id=session.identity)
+                except HistoryError as error:
+                    await send_event(websocket, "error", str(error), request_id=request.request_id,
+                                     data={"code": type(error).__name__})
+                await send_event(websocket, "ready", request_id=request.request_id)
                 continue
 
             question = request.question.strip()
@@ -239,21 +255,24 @@ async def knowledge_socket(websocket: WebSocket):
                 request_id=request_id,
             )
             try:
-                async with aclosing(workflow.stream(question, session)) as events:
+                async with aclosing(session.stream(workflow, request)) as events:
                     async for event in events:
-                        if event["type"] == "_complete":
-                            session = event["data"]
-                            continue
                         sources = [KnowledgeSource.model_validate(item) for item in event.get("sources", [])]
                         await send_event(
                             websocket, event["type"], event.get("content", ""),
                             sources=sources, request_id=request_id, data=event.get("data"),
+                            conversation_id=session.identity,
                         )
 
-                await send_event(websocket, "done", request_id=request_id)
+                await send_event(websocket, "done", request_id=request_id,
+                    conversation_id=session.identity, data={"persisted": session.identity is not None})
                 await send_event(websocket, "ready", request_id=request_id)
             except WebSocketDisconnect:
                 raise
+            except HistoryError as error:
+                await send_event(websocket, "error", str(error), request_id=request_id,
+                                 data={"code": type(error).__name__}, conversation_id=session.identity)
+                await send_event(websocket, "ready", request_id=request_id)
             except Exception as error:
                 logging.getLogger("uvicorn.error").warning("RAG request failed (%s)", type(error).__name__)
                 await send_event(

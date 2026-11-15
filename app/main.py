@@ -14,6 +14,7 @@ from app.services.knowledge_llm import KnowledgeLlmService
 from app.services.rag_models import DashScopeRetrievalModels
 from app.services.rag_pipeline import RagPipeline
 from app.services.knowledge_workflow import KnowledgeWorkflow
+from app.services.conversation_store import ConversationStore, HistoryError
 
 
 @asynccontextmanager
@@ -32,7 +33,15 @@ async def lifespan(app: FastAPI):
     conversion_service = None
     retrieval_models = None
     retriever = None
+    history_store = None
     try:
+        if settings.knowledge_history_store == "mysql":
+            history_store = ConversationStore(settings)
+            try:
+                await history_store.check()
+            except HistoryError:
+                logging.getLogger("uvicorn.error").warning("History storage is unavailable; temporary questions remain supported")
+        app.state.conversation_store = history_store
         if settings.knowledge_retrieval_mode != "keyword" or settings.knowledge_rerank_enabled:
             retrieval_models = DashScopeRetrievalModels(settings)
         retriever = RagPipeline(
@@ -68,6 +77,8 @@ async def lifespan(app: FastAPI):
             await retrieval_models.close()
         if retriever is not None:
             await retriever.close()
+        if history_store is not None:
+            await history_store.close()
         await app.state.glm_service.close()
 
 

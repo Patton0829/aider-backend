@@ -77,6 +77,26 @@ class Settings(BaseModel):
     knowledge_cache_timeout_seconds: float = Field(default=0.2, gt=0, le=5)
     knowledge_cache_retry_seconds: float = Field(default=30, gt=0, le=300)
     redis_url: str = Field(default="redis://127.0.0.1:6380/0", repr=False)
+    knowledge_history_store: Literal["off", "mysql"] = "off"
+    knowledge_database_url: str = Field(default="", repr=False)
+    knowledge_history_db_timeout_seconds: float = Field(default=5, gt=0, le=30)
+    knowledge_history_lease_seconds: int = Field(default=300, ge=30, le=3600)
+
+    @field_validator("knowledge_database_url")
+    @classmethod
+    def validate_database_url(cls, value: str) -> str:
+        if not value:
+            return value
+        from sqlalchemy.engine import make_url
+        try:
+            url = make_url(value)
+            if url.drivername != "mysql+asyncmy" or not url.host or not url.database:
+                raise ValueError
+            if url.port is not None and not 1 <= url.port <= 65535:
+                raise ValueError
+        except Exception:
+            raise ValueError("KNOWLEDGE_DATABASE_URL must be mysql+asyncmy:// with a host and database") from None
+        return value
 
     @field_validator("redis_url")
     @classmethod

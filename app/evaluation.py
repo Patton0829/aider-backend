@@ -25,10 +25,10 @@ async def wait_ready(socket):
             pass
 
 
-async def run_turn(socket, question: str, request_id: str) -> dict:
+async def run_turn(socket, question: str, request_id: str, extra: dict | None = None) -> dict:
     result = {"question": question, "deltaCount": 0, "sources": [], "answer": ""}
     started = time.perf_counter()
-    await socket.send(json.dumps({"type": "ask", "question": question, "requestId": request_id}))
+    await socket.send(json.dumps({**(extra or {}), "type": "ask", "question": question, "requestId": request_id}))
     async with asyncio.timeout(180):
         while True:
             event = json.loads(await socket.recv())
@@ -51,6 +51,7 @@ async def run_turn(socket, question: str, request_id: str) -> dict:
                 result[kind] = event["data"]
             elif kind == "done":
                 result["totalMs"] = elapsed
+                result["persisted"] = bool(event.get("data", {}).get("persisted"))
             elif kind == "error":
                 raise RuntimeError("Backend returned a retrieval/model error; inspect server logs")
             elif kind == "ready":

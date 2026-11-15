@@ -1,0 +1,17 @@
+{
+  "environment": {
+    "location": "development machine; not controller",
+    "database": "MySQL 9.7.0, dedicated password-authenticated account"
+  },
+  "passed": true,
+  "checks": {
+    "completedAnswerSurvivesProcessRestart": true,
+    "replayAfterProcessRestart": true,
+    "replayedSourceMetadataPreserved": true,
+    "followupAfterProcessRestart": true
+  },
+  "limits": [
+    "History access uses browser-held capabilities, not central JWT account synchronization.",
+    "Existing controller service has not been changed by these local tests."
+  ]
+}

@@ -30,7 +30,7 @@ async def smoke(settings: Settings, api_base: str, question: str) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["check", "indexes", "rebuild", "activate", "smoke", "evaluate", "cache-check", "cache-smoke"])
+    parser.add_argument("command", choices=["check", "indexes", "rebuild", "activate", "smoke", "evaluate", "cache-check", "cache-smoke", "db-init", "history-check", "history-smoke"])
     parser.add_argument("version", nargs="?")
     parser.add_argument("--api-base", default="http://127.0.0.1:8000")
     parser.add_argument("--question", default="转辙机锁闭不到位，可能有哪些原因？应按什么顺序检查？")
@@ -41,6 +41,28 @@ def main():
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
     settings = Settings.from_env()
+    if args.command == "db-init":
+        from app.services.conversation_store import ConversationStore
+        async def initialize():
+            store = ConversationStore(settings)
+            try:
+                await store.initialize()
+                print(json.dumps(await store.check(), ensure_ascii=False, indent=2))
+            finally:
+                await store.close()
+        try:
+            asyncio.run(initialize())
+            return 0
+        except Exception as error:
+            print(f"Database initialization failed ({type(error).__name__}); check local database settings and permissions.", file=sys.stderr)
+            return 1
+    if args.command == "history-smoke":
+        from app.history_check import history_smoke
+        try:
+            return asyncio.run(history_smoke(settings, args.api_base, args.question))
+        except Exception as error:
+            print(f"History smoke test failed ({type(error).__name__}); inspect backend/database status.", file=sys.stderr)
+            return 1
     if args.command == "evaluate":
         from app.evaluation import evaluate
         return asyncio.run(evaluate(settings, args.api_base, args.dataset, args.output, args.limit))
@@ -57,6 +79,8 @@ def main():
         needs_api_key = settings.knowledge_provider == "qwen" or settings.knowledge_retrieval_mode != "keyword" or settings.knowledge_rerank_enabled
         if needs_api_key and not settings.dashscope_api_key.strip():
             failures.append("DASHSCOPE_API_KEY is missing from .env")
+        if settings.knowledge_history_store == "mysql" and not settings.knowledge_database_url:
+            failures.append("KNOWLEDGE_DATABASE_URL is required when MySQL history is enabled")
         versions = {}
         try:
             versions["langgraph"] = importlib.metadata.version("langgraph")
@@ -66,6 +90,11 @@ def main():
             versions["redis"] = importlib.metadata.version("redis")
         except importlib.metadata.PackageNotFoundError:
             failures.append("Missing package: redis; run scripts/setup.sh")
+        for package in ["SQLAlchemy", "asyncmy", "cryptography"]:
+            try:
+                versions[package] = importlib.metadata.version(package)
+            except importlib.metadata.PackageNotFoundError:
+                failures.append(f"Missing package: {package}; run scripts/setup.sh")
         if settings.knowledge_vector_store == "milvus_lite":
             for package in ["pymilvus", "milvus-lite", "faiss-cpu", "pyarrow"]:
                 try:
@@ -79,6 +108,7 @@ def main():
             "rewriteFollowups": settings.knowledge_rewrite_followups,
             "queryCacheEnabled": settings.knowledge_cache_enabled,
             "queryCacheTtlSeconds": settings.knowledge_cache_ttl_seconds,
+            "historyStore": settings.knowledge_history_store,
             "knowledgeDirectory": str(settings.knowledge_base_dir),
             "milvusPath": str(settings.knowledge_milvus_uri),
             "catalogPath": str(settings.knowledge_index_catalog_path),
@@ -89,6 +119,7 @@ def main():
     paths = {"indexes": ("GET", "/api/knowledge/indexes"), "rebuild": ("POST", "/api/knowledge/indexes/rebuild"),
              "cache-check": ("GET", "/api/knowledge/cache"),
              "cache-smoke": ("POST", "/api/knowledge/cache/probe")}
+    paths["history-check"] = ("GET", "/api/knowledge/history/status")
     if args.command == "activate":
         if not args.version or not all(c in "0123456789abcdef" for c in args.version) or len(args.version) != 64:
             parser.error("activate requires the full 64-character index version")
@@ -105,7 +136,7 @@ def main():
         with opener.open(request, timeout=600) as response:
             payload = json.load(response)
             print(json.dumps(payload, ensure_ascii=False, indent=2))
-            if args.command == "cache-check":
+            if args.command in ("cache-check", "history-check"):
                 return 0 if payload.get("state") == "ready" else 1
             if args.command == "cache-smoke":
                 return 0 if payload.get("passed") else 1

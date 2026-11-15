@@ -201,7 +201,7 @@ conversation（路由、追问补全）
 独立问题不调用改写模型。连续追问使用独立保存的故障主题与最近对话补全检索问题，
 即使历史被截断也保留原始主题；改写失败时退回“原始主题＋最近问题＋本轮追问”。
 显式更换设备主题会清除旧主题。基础路由与追问识别仍使用规则，并非模型语义路由。
-会话只在当前 WebSocket 连接内保存，清空或断开即释放，尚未接入 MySQL/Redis。
+未启用第四阶段 MySQL 历史功能时，会话只在当前 WebSocket 连接内保存，清空或断开即释放。
 
 检索后进行一次关闭思考的短 JSON 模型请求，判断资料是否支持问题，并选择可用证据：
 
@@ -386,6 +386,159 @@ RAG_TEST_REDIS_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m unittest discove
 测试使用独立随机键前缀，不清空 Redis；不设置测试地址时跳过真实 Redis 连接测试。
 
 异步连接、超时与客户端关闭遵循 [Redis 官方 Python 异步客户端文档](https://redis.io/docs/latest/develop/clients/redis-py/async/)。
+
+## 第四阶段：MySQL 历史会话与结果持久化
+
+可选将诊断会话与每轮问答保存到专用 MySQL 数据库。默认关闭，旧前端、旧 WebSocket 客户端
+继续使用原有临时会话。新前端支持新建、历史列表、恢复、分页加载、清空、删除，以及查看每轮依据。
+刷新页面或服务重启后，可恢复**已经完成并提交**的对话、故障主题和最近上下文。
+回答过程中断会记录为 `failed` / `interrupted`，保留已收到的部分文本，但不加入后续模型上下文。
+进程崩溃遗留的运行记录在租约到期后标记为中断，不会当作完整回答使用。
+
+数据库包含以下带 `rag_` 前缀的表，初始化不会删除或改写中心云业务表：
+
+- `rag_schema_version`：本功能表结构版本。
+- `rag_conversations`：会话、归属凭据哈希、当前上下文、修订号及写入租约。
+- `rag_turns`：问题、答案、完成状态、模型、证据快照、知识库版本、引用校验及阶段耗时。
+
+同一会话使用 MySQL 行锁和可续期的租约串行写入；不同会话可以并发。
+每个持久问答必须携带 `requestId`。相同编号、相同问题的已完成请求回放原记录，
+不再次调用模型；相同编号换问题、重复的未完成请求或当前会话正在生成时返回明确冲突。
+提交回答和更新上下文位于同一事务；数据库提交失败时不发送成功保存状态。
+已有历史数据不可读取时明确报错，不会静默创建空会话覆盖原历史。临时问答仍可独立使用。
+
+目前访问隔离采用浏览器保存的随机会话凭据，服务端只保存 SHA-256 哈希。
+HTTP 通过 `X-Conversation-Token`，WebSocket 通过消息体 `ownerToken` 提供，凭据不放入 URL，
+并继续沿用原 `AGENT_API_TOKEN` 服务鉴权。知道会话 ID 并不足以读取、删除或恢复会话。
+前端按当前登录账号分开保存浏览器凭据，但后端尚未对接中心云 JWT/统一用户身份，
+**不提供跨设备账号历史同步**。清除浏览器存储，或现有退出登录流程清空本地存储后，
+原凭据丢失将无法从该浏览器访问对应旧记录；后续接入统一用户身份时再提供账号级恢复。
+
+新增配置：
+
+```dotenv
+KNOWLEDGE_HISTORY_STORE=mysql
+KNOWLEDGE_DATABASE_URL=mysql+asyncmy://aider_rag:本机配置的URL编码密码@127.0.0.1:3306/aider_rag
+KNOWLEDGE_HISTORY_DB_TIMEOUT_SECONDS=5
+KNOWLEDGE_HISTORY_LEASE_SECONDS=300
+```
+
+连接串只放在服务器 `.env`。密码含特殊字符时需 URL 编码；首次配置可使用下面的辅助脚本，
+它生成独立随机密码并直接写入本地文件，保留现有模型、密钥、路径及 Redis 配置。
+MySQL/MariaDB 业务实例如已存在，不要为本功能重新安装或替换数据库服务。
+初始化命令显式创建新表，不在每次后端启动时自动建表或升级表结构。
+
+```bash
+# 首次创建本机专用数据库和用户；会提示输入现有 MySQL 管理员密码
+cd /root/system/aider-backend
+.venv/bin/python scripts/configure_mysql_history.py
+# 若管理员用户名、MySQL 命令路径或端口不同，使用脚本 --help 查看参数。
+```
+
+该脚本仅授予专用数据库权限，不修改已有账号密码；数据库用户已存在时会停止，
+不会自动旋转凭据。已有专用数据库连接时跳过脚本，直接配置 `.env` 后执行 `db-init`。
+脚本依赖服务器已有的 `mysql` 命令；管理员密码通过客户端终端提示输入，生成的业务密码经 stdin
+传入 MySQL，不进入进程命令参数或输出日志。SQL 执行失败时保留原 `.env`。
+
+```bash
+.venv/bin/python -m app.manage db-init
+.venv/bin/python -m app.manage check
+systemctl restart aider-backend
+curl -fsS --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8000/health
+.venv/bin/python -m app.manage history-check
+.venv/bin/python -m app.manage history-smoke
+```
+
+`history-check` 验证运行中后端的数据库连接及表结构。
+`history-smoke` 创建仅归本次测试所有的临时持久会话，验证保存、断线重连、原请求回放、
+追问上下文以及其他凭据访问被拒绝；结束后只删除本次测试会话，不清空业务记录。
+该测试会调用真实问答 API。
+
+管理 API：
+
+```text
+GET    /api/knowledge/history/status
+POST   /api/knowledge/conversations
+GET    /api/knowledge/conversations?limit=20&offset=0
+GET    /api/knowledge/conversations/{id}?limit=50&before=序号
+DELETE /api/knowledge/conversations/{id}
+```
+
+会话 API 除状态检查外，均要求有效的 `X-Conversation-Token`。持久 WebSocket 示例：
+
+```json
+{"type":"resume","conversationId":"REST创建的UUID","ownerToken":"浏览器随机凭据","requestId":"resume-1"}
+```
+
+```json
+{"type":"ask","question":"转辙机锁闭不到位的原因？","conversationId":"REST创建的UUID","ownerToken":"浏览器随机凭据","requestId":"唯一问答编号"}
+```
+
+新增 `history`、`session` 事件及 `conversationId` 字段；只有 MySQL 提交成功后，
+才发送带 `persisted=true` 的完成状态。清空持久会话需携带相同凭据，且会删除本会话的问答和上下文；
+新建会话不删除旧记录。前端完成恢复前会暂停发送，避免在旧上下文尚未加载时提交追问。
+第三阶段 Redis 仍只缓存检索和重排，不缓存历史问答或最终答案。
+
+MySQL 数据应与原始知识库、索引 catalog 一同纳入现有备份流程。
+表中保留证据的片段、内容哈希及知识库版本，历史原文追溯还依赖对应版本的 catalog/知识库文件。
+
+### 第三、四阶段一起部署
+
+1. 更新后端并安装锁定依赖：
+
+   ```bash
+   cd /root/system/aider-backend
+   git pull --ff-only
+   PYTHON_BIN=/opt/miniconda3/bin/python3 bash scripts/setup.sh
+   ```
+
+2. 按第三阶段说明安装专用 Redis（或复用已有实例），启用 `KNOWLEDGE_CACHE_ENABLED=true`。
+   按第四阶段配置专用 MySQL 连接，并运行 `.venv/bin/python -m app.manage db-init`。
+
+3. 更新前端诊断页和 `useHistory.ts`。从前端仓库拉取相应提交；若使用补丁交付，先检查再应用：
+
+   ```bash
+   cd /root/system/control-center-fe
+   git apply --check /上传目录/frontend-history.patch
+   git apply /上传目录/frontend-history.patch
+   pnpm build
+   ```
+
+   仓库拉取和补丁是两种交付方式，已经包含该提交时不要重复应用补丁。
+   补丁冲突时保留现场改动并人工合并，不强制覆盖。生成的 `dist/` 按现有 Nginx 静态目录发布流程发布，
+   不修改中心云的其他页面或后端业务配置。前端未更新时仍只能使用临时会话。
+
+   也可使用随前端发布的 Git bundle 在服务器离线获取提交，再进行三方合并：
+
+   ```bash
+   git fetch /上传目录/frontend-history.bundle HEAD
+   git cherry-pick FETCH_HEAD
+   pnpm build
+   ```
+
+   bundle 需要服务器前端仓库包含其基础提交；可先运行 `git bundle verify /上传目录/frontend-history.bundle`。
+   应用前先检查工作区改动，不将未提交的现场修改强行覆盖。
+
+4. 配置完成后统一重启并验证：
+
+   ```bash
+   cd /root/system/aider-backend
+   .venv/bin/python -m app.manage check
+   systemctl restart aider-backend
+   curl -fsS --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8000/health
+   .venv/bin/python -m app.manage cache-check
+   .venv/bin/python -m app.manage cache-smoke
+   .venv/bin/python -m app.manage history-check
+   .venv/bin/python -m app.manage history-smoke
+   ```
+
+5. 打开前端发送问题，刷新后确认记录和依据恢复，再发追问。
+   后端服务重启后再恢复同一会话，确认已完成的历史仍在。
+
+回退时可设 `KNOWLEDGE_HISTORY_STORE=off`、`KNOWLEDGE_CACHE_ENABLED=false` 后重启，
+原有临时问答继续可用，MySQL 历史表和 Milvus 数据保留。
+
+实现依据：[SQLAlchemy 异步连接文档](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)。
 
 ## 算法代码语言转换
 
