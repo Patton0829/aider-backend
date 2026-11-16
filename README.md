@@ -719,8 +719,12 @@ KNOWLEDGE_QWEN_TIMEOUT_SECONDS=60
 故障诊断页面右上角可逐轮选择“云端千问”或“GLM”，默认选择云端千问。
 前端在 `/ws/knowledge` 的 `ask` 请求中发送 `provider: "qwen" | "glm"`；
 未传该字段的旧客户端仍使用服务器 `KNOWLEDGE_PROVIDER` 配置。
-切换只影响本轮生成、追问改写、证据审核及记忆摘录选择，继续使用同一会话上下文，
+切换影响本轮生成、追问改写及记忆摘录选择，继续使用同一会话上下文，
 Embedding、重排和 Milvus 索引不变，也不会改变其他用户的选择。
+证据审核固定复用千问 `KNOWLEDGE_QWEN_MODEL`，即使最终回答选择 GLM 也不会使用 GLM 审核。
+需配置 `DASHSCOPE_API_KEY`；千问审核不可用时明确提示，不会自动改由 GLM 审核或跳过审核。
+`assessment` 事件及历史记录的 `assessment` JSON 中包含实际审核 `provider`、`model`；
+`rag_turns.provider/model` 继续记录最终回答模型。
 两个提供方分别复用各自的客户端与并发限制，GLM 地址及模型由 `GLM_BASE_URL`、
 `GLM_API_KEY`、`GLM_MODEL` 配置；界面“已配置”不代表上游服务已通过连通性检查。
 未配置的模型会明确报错，不会静默切换；生成期间界面禁止切换。

@@ -59,8 +59,10 @@ def timed(state: QuestionState, name: str, started: float) -> dict:
 
 
 class KnowledgeWorkflow:
-    def __init__(self, settings: Settings, knowledge: KnowledgeService, llm, retriever=None):
+    def __init__(self, settings: Settings, knowledge: KnowledgeService, llm, retriever=None, *, evidence_llm=...):
         self.settings, self.knowledge, self.llm, self.retriever = settings, knowledge, llm, retriever
+        # Standalone callers remain compatible; the application explicitly binds Qwen for evidence.
+        self.evidence_llm = llm if evidence_llm is ... else evidence_llm
         self.memory = ConversationMemory(settings, llm)
         graph = StateGraph(QuestionState)
         for name in ("conversation", "retrieve", "assess", "generate", "clarify", "validate", "finish"):
@@ -166,7 +168,9 @@ class KnowledgeWorkflow:
                     question = state["question"]
                     if state["follow_up"]:
                         question = f"已知话题：{state['topic']}\n本轮追问：{question}\n只判断本轮追问所需的证据。"
-                    assessment = await self.llm.assess_evidence(
+                    if self.evidence_llm is None:
+                        raise RuntimeError("Qwen evidence reviewer is not configured")
+                    assessment = await self.evidence_llm.assess_evidence(
                         question, self.knowledge.format_context(results), len(results),
                     )
                     answerable = assessment.answerable
@@ -179,7 +183,9 @@ class KnowledgeWorkflow:
                 except Exception as error:
                     reason = "check_unavailable"
                     logger.warning("RAG evidence check unavailable (%s)", type(error).__name__)
-        emit("assessment", data={"answerable": answerable, "reason": reason, "evidenceNumbers": numbers, "missingInformation": missing})
+        emit("assessment", data={"answerable": answerable, "reason": reason, "evidenceNumbers": numbers, "missingInformation": missing,
+                                 "provider": getattr(self.evidence_llm, "provider", None),
+                                 "model": getattr(self.evidence_llm, "model", None)})
         return {"answerable": answerable, "evidence_numbers": numbers, "missing": missing,
                 "assessment_reason": reason, "timings": timed(state, "assessmentMs", started)}
 

@@ -69,6 +69,7 @@ async def lifespan(app: FastAPI):
             provider: KnowledgeWorkflow(
                 settings.model_copy(update={"knowledge_provider": provider}),
                 app.state.knowledge_service, llm, retriever,
+                evidence_llm=llms.get("qwen"),
             ) for provider, llm in llms.items()
         }
         app.state.knowledge_workflow = app.state.knowledge_workflows[settings.knowledge_provider]

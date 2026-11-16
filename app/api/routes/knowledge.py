@@ -37,6 +37,8 @@ def knowledge_payload(request: Request) -> dict:
         ],
         "workflow": "langgraph_single",
         "evidenceCheck": settings.knowledge_evidence_check,
+        "evidenceProvider": "qwen",
+        "evidenceModel": settings.knowledge_qwen_model,
         "conversationPersistence": "connection",
         "memory": {"enabled": settings.knowledge_memory_enabled,
                    "recentTurns": settings.knowledge_history_turns,

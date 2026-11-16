@@ -28,12 +28,15 @@ def application(*, persistent=False, qwen=True):
         retriever = FakeRetriever()
         llms = {name: FakeLlm() for name in (("qwen", "glm") if qwen else ("glm",))}
         llms["glm"].model_label = "GLM"
+        for provider, llm in llms.items():
+            llm.provider = provider
+            llm.model = "qwen3.8-flash" if provider == "qwen" else "glm"
         app = FastAPI()
         app.state.knowledge_service = knowledge
         app.state.knowledge_llm_service = llms[settings.knowledge_provider]
         app.state.knowledge_workflows = {
             provider: KnowledgeWorkflow(settings.model_copy(update={"knowledge_provider": provider}),
-                                        knowledge, llm, retriever)
+                                        knowledge, llm, retriever, evidence_llm=llms.get("qwen"))
             for provider, llm in llms.items()
         }
         app.state.knowledge_workflow = app.state.knowledge_workflows[settings.knowledge_provider]
@@ -92,11 +95,26 @@ class ModelSelectionTests(unittest.TestCase):
             self.assertEqual(data(glm, "model"), {"provider": "glm", "model": "glm"})
             self.assertEqual(data(other, "model")["provider"], "qwen")
             self.assertTrue(data(glm, "metrics")["followUp"])
+            self.assertEqual(data(glm, "assessment")["provider"], "qwen")
+            self.assertEqual(data(glm, "assessment")["model"], "qwen3.8-flash")
+            self.assertFalse(any(call[0] == "assess" for call in llms["glm"].calls))
+            self.assertEqual(sum(call[0] == "assess" for call in llms["qwen"].calls), 2)
             history = next(call[-1] for call in llms["glm"].calls if call[0] == "generate")
             self.assertIn("转辙机锁闭故障", [message["content"] for message in history])
             self.assertEqual(len(retriever.queries), 2)
             self.assertEqual(app.state.knowledge_workflow.settings.knowledge_provider, "qwen")
             self.assertEqual(app.state.knowledge_workflows["glm"].settings.knowledge_provider, "glm")
+
+    def test_qwen_review_failure_never_uses_glm_as_reviewer_or_generates_unchecked_answer(self):
+        with application() as (client, _, llms, _):
+            llms["qwen"].assessment_error = True
+            with connect(client) as socket:
+                ready(socket)
+                events = ask(socket, question="转辙机锁闭故障", provider="glm", requestId="audit-failure")
+            self.assertEqual(data(events, "assessment")["reason"], "check_unavailable")
+            self.assertEqual(data(events, "assessment")["provider"], "qwen")
+            self.assertEqual(llms["glm"].calls, [])
+            self.assertIn("证据检查暂未完成", "".join(e.get("content", "") for e in events if e["type"] == "delta"))
 
     def test_unconfigured_or_invalid_provider_fails_without_fallback_then_socket_recovers(self):
         with application(qwen=False) as (client, _, llms, _):
