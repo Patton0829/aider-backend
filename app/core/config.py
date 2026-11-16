@@ -72,7 +72,7 @@ class Settings(BaseModel):
     knowledge_bm25_recall_k: int = Field(default=20, ge=1, le=500)
     knowledge_dense_recall_k: int = Field(default=20, ge=1, le=500)
     knowledge_rrf_k: int = Field(default=60, ge=1)
-    knowledge_embedding_model: str = "qwen3.7-text-embedding"
+    knowledge_embedding_model: str = "qwen3.7-text-embedding-flash"
     knowledge_embedding_dimensions: int = Field(default=1024, ge=1)
     knowledge_embedding_batch_size: int = Field(default=20, ge=1, le=20)
     knowledge_embedding_cache_path: Path = PROJECT_ROOT / "storage" / "rag" / "embeddings.sqlite3"

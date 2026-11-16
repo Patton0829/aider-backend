@@ -89,7 +89,7 @@ KNOWLEDGE_RETRIEVAL_MODE=hybrid
 KNOWLEDGE_VECTOR_STORE=milvus_lite
 KNOWLEDGE_MILVUS_URI=storage/rag/milvus.db
 KNOWLEDGE_INDEX_CATALOG_PATH=storage/rag/index_catalog.sqlite3
-KNOWLEDGE_EMBEDDING_MODEL=qwen3.7-text-embedding
+KNOWLEDGE_EMBEDDING_MODEL=qwen3.7-text-embedding-flash
 KNOWLEDGE_EMBEDDING_DIMENSIONS=1024
 KNOWLEDGE_RERANK_ENABLED=true
 KNOWLEDGE_RERANK_MODEL=qwen3.7-text-rerank
@@ -724,7 +724,7 @@ KNOWLEDGE_QWEN_TIMEOUT_SECONDS=60
 
 ```dotenv
 KNOWLEDGE_RETRIEVAL_MODE=hybrid
-KNOWLEDGE_EMBEDDING_MODEL=qwen3.7-text-embedding
+KNOWLEDGE_EMBEDDING_MODEL=qwen3.7-text-embedding-flash
 KNOWLEDGE_EMBEDDING_DIMENSIONS=1024
 KNOWLEDGE_CANDIDATE_K=20
 KNOWLEDGE_BM25_RECALL_K=20
@@ -749,6 +749,11 @@ KNOWLEDGE_TOP_K=5
 重启会复用缓存，上传、删除或修改文档后使用新的片段快照；只有新增或改变的
 片段需要重新调用向量 API。模型名、维度、API 地址或向量文本格式变化后，
 缓存键自动变化，旧模型的向量不会与新模型混用。查询向量和重排按每次请求调用。
+默认向量模型为 `qwen3.7-text-embedding-flash`，维度为 1024。
+已有部署需要单独更新服务器 `.env` 中的 `KNOWLEDGE_EMBEDDING_MODEL`；
+拉取代码不会覆盖现有 `.env`。切换模型后重启服务，会为现有知识库重新生成
+文档向量并发布新的 Milvus Collection，旧版本保留，无需删除数据库或重新上传文档。
+新模型建库失败时不能使用旧模型的索引，需要恢复原模型配置或解决 API 调用问题。
 索引失败会显示检索不可用，不会静默回落到关键词检索。
 
 模块边界：
