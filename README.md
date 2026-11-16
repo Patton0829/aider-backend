@@ -716,6 +716,17 @@ KNOWLEDGE_QWEN_TIMEOUT_SECONDS=60
 已有 `/ws/agent` 的千问代码助手、代码转换任务仍使用各自的模型配置。
 `KNOWLEDGE_PROVIDER=qwen` 且未提供密钥时，启动会明确报错，不会自动回落到 GLM。
 
+故障诊断页面右上角可逐轮选择“云端千问”或“GLM”，默认选择云端千问。
+前端在 `/ws/knowledge` 的 `ask` 请求中发送 `provider: "qwen" | "glm"`；
+未传该字段的旧客户端仍使用服务器 `KNOWLEDGE_PROVIDER` 配置。
+切换只影响本轮生成、追问改写、证据审核及记忆摘录选择，继续使用同一会话上下文，
+Embedding、重排和 Milvus 索引不变，也不会改变其他用户的选择。
+两个提供方分别复用各自的客户端与并发限制，GLM 地址及模型由 `GLM_BASE_URL`、
+`GLM_API_KEY`、`GLM_MODEL` 配置；界面“已配置”不代表上游服务已通过连通性检查。
+未配置的模型会明确报错，不会静默切换；生成期间界面禁止切换。
+`rag_turns` 记录每轮实际使用的 `provider` 和 `model`，相同 `requestId` 不能更换模型重放。
+本次改动无需修改 MySQL 表结构或重建向量索引。
+
 ### 千问向量召回与重排
 
 目前支持三个独立阶段：本地文档解析、候选召回、重排；生成服务继续使用

@@ -38,10 +38,13 @@ class ConversationSession:
         self.state = empty_state()
 
     async def stream(self, workflow, request):
+        generation = {"provider": workflow.settings.knowledge_provider,
+                      "model": workflow.settings.knowledge_model}
         persistent = request.conversation_id is not None or request.owner_token is not None
         if not persistent:
             if self.identity is not None:
                 raise HistoryConflict("当前是持久会话，请携带会话编号和访问凭据。")
+            yield {"type": "model", "data": generation}
             async with aclosing(workflow.stream(request.question.strip(), self.state)) as events:
                 async for event in events:
                     if event["type"] == "_complete":
@@ -53,11 +56,12 @@ class ConversationSession:
         owner, identity = self.credentials(request)
         if not request.request_id or not request.request_id.strip():
             raise HistoryConflict("保存问答需要非空 requestId，以避免重复生成。")
-        lease = await self.store.begin(owner, identity, request.request_id, request.question.strip())
+        lease = await self.store.begin(owner, identity, request.request_id, request.question.strip(), **generation)
         self.owner, self.identity, self.state = owner, identity, lease["state"]
         if "replay" in lease:
             yield {"type": "session", "data": lease["conversation"]}
             record = lease["replay"]
+            yield {"type": "model", "data": {"provider": record["provider"], "model": record["model"]}}
             yield {"type": "route", "content": record["answerMode"] or "knowledge"}
             yield {"type": "sources", "sources": record["sources"]}
             for key in ("assessment", "validation", "metrics"):
@@ -70,6 +74,7 @@ class ConversationSession:
         committed = False
         try:
             yield {"type": "session", "data": lease["conversation"]}
+            yield {"type": "model", "data": generation}
             if self.store.settings.knowledge_memory_enabled and is_conversation_recall(request.question):
                 # Transient retrieval data is not written back into the checkpoint.
                 started = time.perf_counter()

@@ -28,6 +28,13 @@ def knowledge_payload(request: Request) -> dict:
         **request.app.state.knowledge_service.info(),
         "model": settings.knowledge_model,
         "provider": settings.knowledge_provider,
+        "generationModels": [
+            {"provider": "qwen", "model": settings.knowledge_qwen_model,
+             "label": f"云端千问 · {settings.knowledge_qwen_model}",
+             "enabled": "qwen" in getattr(request.app.state, "knowledge_workflows", {})},
+            {"provider": "glm", "model": settings.glm_model, "label": "GLM",
+             "enabled": "glm" in getattr(request.app.state, "knowledge_workflows", {})},
+        ],
         "workflow": "langgraph_single",
         "evidenceCheck": settings.knowledge_evidence_check,
         "conversationPersistence": "connection",
@@ -202,7 +209,7 @@ async def knowledge_socket(websocket: WebSocket):
 
     settings = get_settings()
     knowledge: KnowledgeService = websocket.app.state.knowledge_service
-    workflow = getattr(websocket.app.state, "knowledge_workflow", None) or KnowledgeWorkflow(
+    default_workflow = getattr(websocket.app.state, "knowledge_workflow", None) or KnowledgeWorkflow(
         settings, knowledge, websocket.app.state.knowledge_llm_service,
         getattr(websocket.app.state, "knowledge_retriever", None),
     )
@@ -226,6 +233,7 @@ async def knowledge_socket(websocket: WebSocket):
                     "请求格式不正确，请检查问题长度、请求类型和 requestId。",
                     request_id=request_id,
                 )
+                await send_event(websocket, "ready", request_id=request_id)
                 continue
 
             if request.type == "close":
@@ -256,6 +264,16 @@ async def knowledge_socket(websocket: WebSocket):
                 continue
 
             request_id = request.request_id
+            provider = request.provider or settings.knowledge_provider
+            workflows = getattr(websocket.app.state, "knowledge_workflows", {})
+            workflow = workflows.get(provider)
+            if workflow is None and provider == settings.knowledge_provider:
+                workflow = default_workflow
+            if workflow is None:
+                await send_event(websocket, "error", "所选生成模型未配置，请联系管理员检查模型服务。",
+                                 request_id=request_id)
+                await send_event(websocket, "ready", request_id=request_id)
+                continue
             await send_event(
                 websocket,
                 "status",

@@ -7,6 +7,7 @@ class KnowledgeRequest(BaseModel):
     model_config = ConfigDict(hide_input_in_errors=True)
     type: Literal["ask", "clear", "close", "resume"] = "ask"
     question: str = Field(default="", max_length=2000)
+    provider: Literal["qwen", "glm"] | None = None
     conversation_id: str | None = Field(default=None, min_length=36, max_length=36,
         pattern=r"^[0-9a-fA-F-]{36}$", validation_alias="conversationId", serialization_alias="conversationId")
     owner_token: str | None = Field(default=None, min_length=32, max_length=128,
@@ -49,6 +50,7 @@ class KnowledgeEvent(BaseModel):
         "assessment",
         "validation",
         "metrics",
+        "model",
         "session",
         "history",
     ]

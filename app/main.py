@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
     retrieval_models = None
     retriever = None
     history_store = None
+    llms = {}
     try:
         if settings.knowledge_history_store == "mysql":
             history_store = ConversationStore(settings)
@@ -57,12 +58,20 @@ async def lifespan(app: FastAPI):
                 "RAG index initialization failed (%s); retrieval status is unavailable",
                 type(error).__name__,
             )
-        if settings.knowledge_provider == "qwen":
-            knowledge_llm = KnowledgeLlmService(settings)
+        # One shared client/semaphore per provider; a browser choice never mutates global settings.
+        llms = {"glm": app.state.glm_service}
+        if settings.knowledge_provider == "qwen" or settings.dashscope_api_key.strip():
+            knowledge_llm = KnowledgeLlmService(settings, provider="qwen")
+            llms["qwen"] = knowledge_llm
+        knowledge_llm = llms[settings.knowledge_provider]
         app.state.knowledge_llm_service = knowledge_llm
-        app.state.knowledge_workflow = KnowledgeWorkflow(
-            settings, app.state.knowledge_service, knowledge_llm, retriever,
-        )
+        app.state.knowledge_workflows = {
+            provider: KnowledgeWorkflow(
+                settings.model_copy(update={"knowledge_provider": provider}),
+                app.state.knowledge_service, llm, retriever,
+            ) for provider, llm in llms.items()
+        }
+        app.state.knowledge_workflow = app.state.knowledge_workflows[settings.knowledge_provider]
         conversion_service = CodeConversionService(settings, app.state.glm_service.client)
         app.state.code_conversion_service = conversion_service
         await conversion_service.recover_incomplete_jobs()
@@ -71,8 +80,9 @@ async def lifespan(app: FastAPI):
         await app.state.aider_sessions.close_all()
         if conversion_service is not None:
             await conversion_service.close()
-        if knowledge_llm is not app.state.glm_service:
-            await knowledge_llm.close()
+        for provider, llm in llms.items():
+            if provider != "glm":
+                await llm.close()
         if retrieval_models is not None:
             await retrieval_models.close()
         if retriever is not None:

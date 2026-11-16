@@ -140,6 +140,11 @@ class KnowledgeProviderApiTest(unittest.TestCase):
                     self.assertIsNot(
                         app.state.knowledge_llm_service.client, app.state.glm_service.client
                     )
+                    self.assertIs(app.state.knowledge_workflows["glm"].llm, app.state.glm_service)
+                    self.assertIs(app.state.knowledge_workflows["qwen"].llm, app.state.knowledge_llm_service)
+                    self.assertEqual(app.state.knowledge_workflows["glm"].settings.knowledge_provider, "glm")
+                    self.assertIs(app.state.knowledge_workflows["glm"].retriever,
+                                  app.state.knowledge_workflows["qwen"].retriever)
 
 
 if __name__ == "__main__":

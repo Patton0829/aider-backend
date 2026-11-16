@@ -226,10 +226,12 @@ class ConversationStore:
                 "records": records, "hasMore": total > len(records),
                 "scannedLimit": self.settings.knowledge_memory_scan_limit if mode == "search" else None}
 
-    async def begin(self, owner, identity, request_id, question):
+    async def begin(self, owner, identity, request_id, question, *, provider=None, model=None):
         if not request_id or request_id != request_id.strip():
             raise HistoryConflict("请求编号不可为空或包含首尾空白。")
         hashed = hashlib.sha256(question.encode()).hexdigest()
+        provider = provider or self.settings.knowledge_provider
+        model = model or self.settings.knowledge_model
         now, token = self.clock(), str(uuid.uuid4())
         async with self.operation() as connection:
             conversation = await self._locked(connection, owner, identity)
@@ -239,6 +241,8 @@ class ConversationStore:
             if existing is not None:
                 if existing["question_hash"] != hashed:
                     raise HistoryConflict("相同请求编号不能对应不同问题。")
+                if existing["provider"] != provider or existing["model"] != model:
+                    raise HistoryConflict("相同请求编号不能切换生成模型，请使用新请求编号。")
                 if existing["status"] == "completed":
                     return {"replay": self.turn_record(existing), "state": conversation["state"], "conversation": self.summary(conversation)}
                 raise HistoryConflict("该请求正在处理或未完整结束，请恢复会话后使用新请求编号重试。")
@@ -247,7 +251,7 @@ class ConversationStore:
             await connection.execute(insert(turns).values(
                 id=token, conversation_id=identity, request_id=request_id, question_hash=hashed,
                 sequence=conversation["next_sequence"], question=question, answer="", status="running",
-                provider=self.settings.knowledge_provider, model=self.settings.knowledge_model,
+                provider=provider, model=model,
                 sources=[], assessment={}, validation={}, metrics={}, created_at=now,
             ))
             await connection.execute(update(conversations).where(conversations.c.id == identity).values(
